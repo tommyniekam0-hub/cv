@@ -1,5 +1,6 @@
 # Secrets
 .streamlit/secrets.toml
+/config_email.json
 
 # Python
 __pycache__/

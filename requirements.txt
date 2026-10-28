@@ -6,7 +6,7 @@ scikit-learn
 numpy
 openpyxl
 plotly
-# OCR des CV scannés (optionnel, télécharge PyTorch ~1-2 Go)
-easyocr
+# OCR des CV scannés (léger, ONNX, sans PyTorch)
+rapidocr-onnxruntime
 # Uniquement pour test_email.py sous Python < 3.11
 tomli; python_version < "3.11"

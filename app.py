@@ -530,6 +530,7 @@ for d in [DOSSIER_TRI, DOSSIER_EXCEL, DOSSIER_FILTRES, DOSSIER_A_TRAITER]:
 # CONSTANTES APPRENTISSAGE
 # ============================================================
 FICHIER_APPRENTISSAGE = "apprentissage.json"
+FICHIER_CONFIG_EMAIL = "config_email.json"
 SEUIL_CONFIANCE_DEFAUT = 70
 
 SEUILS_CHAMPS = {
@@ -1096,6 +1097,52 @@ def sauvegarder_apprentissage(app):
     except: return False
 
 
+# ============================================================
+# MODULE : CONFIGURATION MESSAGERIE (IMAP)
+# ============================================================
+def config_email_vide():
+    return {
+        'imap_server': '', 'imap_port': 993,
+        'email_address': '', 'app_password': '',
+        'dossier_traites': 'CV traités',
+    }
+
+
+def charger_config_email():
+    cfg = config_email_vide()
+    if os.path.exists(FICHIER_CONFIG_EMAIL):
+        try:
+            with open(FICHIER_CONFIG_EMAIL, 'r', encoding='utf-8') as f:
+                donnees = json.load(f)
+            for cle, val in donnees.items():
+                if cle in cfg:
+                    cfg[cle] = val
+        except: pass
+    return cfg
+
+
+def sauvegarder_config_email(cfg):
+    try:
+        with open(FICHIER_CONFIG_EMAIL, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        return True
+    except: return False
+
+
+def creds_messagerie():
+    """Identifiants IMAP : priorité à la configuration UI, sinon secrets.toml."""
+    cfg = st.session_state.get('config_email') or config_email_vide()
+    if cfg.get('imap_server') and cfg.get('email_address'):
+        return (cfg['imap_server'], int(cfg.get('imap_port') or 993), cfg['email_address'],
+                cfg.get('app_password', ''), cfg.get('dossier_traites', 'CV traités'))
+    try:
+        config = st.secrets["email"]
+        return (config["imap_server"], int(config["imap_port"]), config["email_address"],
+                config["app_password"], config.get("dossier_traites", "CV traités"))
+    except Exception:
+        return None
+
+
 def appliquer_apprentissage(infos, app):
     if infos.get('sexe') == "RAS":
         prenom = infos.get('prenom', '').lower()
@@ -1343,8 +1390,21 @@ def est_cv_image(chemin):
     except: return False
 
 
-def lire_avec_easyocr(chemin):
-    reader = st.session_state.get('easyocr_reader')
+def _texte_ocr(resultat):
+    """Normalise la sortie de RapidOCR (compatible tuple v1.2/v1.3 et objet v1.4+)."""
+    if resultat is None:
+        return ""
+    if isinstance(resultat, tuple):
+        resultat = resultat[0]
+    if resultat is None:
+        return ""
+    if hasattr(resultat, 'txts'):
+        return "\n".join(t for t in resultat.txts if t)
+    return "\n".join(item[1] for item in resultat if len(item) > 1 and item[1])
+
+
+def lire_avec_ocr(chemin):
+    reader = charger_ocr()
     if not reader: return ""
     try:
         if chemin.lower().endswith('.pdf'):
@@ -1353,14 +1413,11 @@ def lire_avec_easyocr(chemin):
             for page in doc:
                 pix = page.get_pixmap(dpi=100)
                 img_bytes = pix.tobytes("png")
-                resultats = reader.readtext(img_bytes, detail=0, paragraph=True,
-                                            batch_size=4, workers=4)
-                texte_final += "\n".join(resultats) + "\n"
+                texte_final += _texte_ocr(reader(img_bytes)) + "\n"
             doc.close()
             return texte_final
         else:
-            resultats = reader.readtext(chemin, detail=0, paragraph=True)
-            return "\n".join(resultats)
+            return _texte_ocr(reader(chemin))
     except: return ""
 
 
@@ -1381,7 +1438,7 @@ def lire_cv(chemin):
             return texte
     except: pass
     if len(texte.strip()) >= 300: return texte
-    texte_ocr = lire_avec_easyocr(chemin)
+    texte_ocr = lire_avec_ocr(chemin)
     if texte_ocr and len(texte_ocr.strip()) > len(texte.strip()):
         return texte_ocr
     return texte
@@ -1492,10 +1549,11 @@ def generer_resume(infos, categorie, metier="RAS"):
 # CHARGEMENT DES MODÈLES
 # ============================================================
 @st.cache_resource(show_spinner=False)
-def charger_easyocr():
+def charger_ocr():
+    """Charge RapidOCR (ONNX, sans PyTorch) — uniquement à la demande, pour un CV scanné."""
     try:
-        import easyocr
-        return easyocr.Reader(['fr', 'en'], gpu=False, verbose=False)
+        from rapidocr_onnxruntime import RapidOCR
+        return RapidOCR()
     except: return None
 
 
@@ -1538,8 +1596,8 @@ def init_session():
             st.session_state.classif = charger_classificateur(app['exemples'], app['stats'].get('version_modele', 0))
     if 'extract' not in st.session_state:
         st.session_state.extract = ExtracteurInfos()
-    if 'easyocr_reader' not in st.session_state:
-        st.session_state.easyocr_reader = charger_easyocr()
+    if 'config_email' not in st.session_state:
+        st.session_state.config_email = charger_config_email()
     defauts = {
         'resultats': [], 'cv_a_valider': [], 'cv_corriges': [], 'journal': [],
         'page_active': "Accueil", 'seuil_confiance': SEUIL_CONFIANCE_DEFAUT,
@@ -2337,15 +2395,12 @@ def traiter_email(em, gestionnaire):
 
 def page_emails():
     ui.entete("Boîte mail RH", "Récupérez et analysez automatiquement les CV reçus par email.")
-    try:
-        config = st.secrets["email"]
-        serveur, port = config["imap_server"], config["imap_port"]
-        email_address, mot_de_passe = config["email_address"], config["app_password"]
-        dossier_traites = config.get("dossier_traites", "CV traités")
-    except Exception:
-        ui.message("Identifiants de messagerie introuvables. Copiez <code>.streamlit/secrets.toml.example</code> "
-                   "en <code>.streamlit/secrets.toml</code> et renseignez-le.", 'rose', 'erreur')
+    creds = creds_messagerie()
+    if not creds:
+        ui.message("Identifiants de messagerie introuvables. Renseignez-les dans l'onglet <b>Paramètres</b> "
+                   "(ou via <code>.streamlit/secrets.toml</code>).", 'rose', 'erreur')
         return
+    serveur, port, email_address, mot_de_passe, dossier_traites = creds
 
     with st.container(key="carte_boite"):
         t, b1, b2 = st.columns([4, 1.6, 1], vertical_alignment="center")
@@ -2459,6 +2514,36 @@ def page_parametres():
         c1.text_input("CV classés", value=os.path.abspath(DOSSIER_TRI), disabled=True, key="p_d1")
         c2.text_input("Exports Excel", value=os.path.abspath(DOSSIER_EXCEL), disabled=True, key="p_d2")
         c3.text_input("Sélections filtrées", value=os.path.abspath(DOSSIER_FILTRES), disabled=True, key="p_d3")
+
+    with st.container(key="carte_messagerie"):
+        ui.afficher('<div class="cv-h2">Messagerie</div>'
+                    '<div class="cv-muted">Identifiants IMAP pour récupérer les CV reçus par email (page Emails). '
+                    'Le mot de passe est stocké en clair dans un fichier local.</div>')
+        cfg = st.session_state.config_email
+        c1, c2 = st.columns(2)
+        with c1:
+            serveur = st.text_input("Serveur IMAP", value=cfg.get('imap_server', ''), placeholder="imap.example.com")
+            email_address = st.text_input("Adresse email", value=cfg.get('email_address', ''))
+            dossier_traites = st.text_input("Dossier des emails traités", value=cfg.get('dossier_traites', 'CV traités'))
+        with c2:
+            port = st.number_input("Port", value=int(cfg.get('imap_port') or 993), min_value=1, max_value=65535)
+            mdp = st.text_input("Mot de passe d'application", value=cfg.get('app_password', ''), type="password")
+
+        b1, b2 = st.columns([1.2, 1.2])
+        if b1.button("Enregistrer", type="primary", key="btn_save_email", use_container_width=True):
+            cfg.update({'imap_server': serveur, 'imap_port': int(port), 'email_address': email_address,
+                        'app_password': mdp, 'dossier_traites': dossier_traites})
+            sauvegarder_config_email(cfg)
+            st.session_state.config_email = cfg
+            flash("Identifiants de messagerie enregistrés.")
+            st.rerun()
+        if b2.button("Tester la connexion", key="btn_test_email", use_container_width=True):
+            with st.spinner("Connexion au serveur IMAP..."):
+                ok, msg = tester_connexion(serveur, int(port), email_address, mdp)
+            if ok:
+                ui.message("Connexion IMAP réussie.", 'vert', 'valide')
+            else:
+                ui.message(f"Connexion impossible : {escape(msg)}", 'rose', 'erreur')
 
     with st.container(key="carte_donnees"):
         ui.afficher('<div class="cv-h2">Données</div>')

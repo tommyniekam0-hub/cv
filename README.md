@@ -23,7 +23,7 @@ Extracted fields: name, first name, email, phone, age, sex, marital status, nati
 ## Requirements
 
 - **Python 3.10+** recommended, Streamlit 1.41+ (3.9 works for the app itself; `test_email.py` needs `tomli` on < 3.11, installed automatically from `requirements.txt`)
-- ~2 GB of free disk space if you install the optional OCR dependency (`easyocr` pulls in PyTorch)
+- ~200 MB of free disk space if you install the optional OCR dependency (`rapidocr-onnxruntime` pulls in ONNX Runtime + OpenCV, no PyTorch)
 
 ## Getting started
 
@@ -41,10 +41,10 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> **No OCR needed?** `easyocr` is only used for scanned CVs (PDFs with no selectable text). You can skip it to save time and disk space by installing everything except that line — the app detects that it is missing and simply skips OCR:
+> **No OCR needed?** `rapidocr-onnxruntime` is only used for scanned CVs (PDFs with no selectable text). You can skip it to save time and disk space by installing everything except that line — the app detects that it is missing and simply skips OCR:
 >
 > ```bash
-> grep -v '^easyocr' requirements.txt | pip install -r /dev/stdin
+> grep -v '^rapidocr-onnxruntime' requirements.txt | pip install -r /dev/stdin
 > ```
 
 ### Configure the mailbox (optional — only for the 📧 Emails page)
@@ -54,6 +54,8 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 ```
 
 Then edit `.streamlit/secrets.toml` with your IMAP server, port, address and an **app password**. This file is git-ignored: never commit it.
+
+> You can also configure these credentials directly in the app: **Paramètres → Messagerie**. They are saved to `config_email.json` (git-ignored) and take priority over `secrets.toml`.
 
 You can check the connection with:
 
@@ -67,7 +69,7 @@ python test_email.py
 streamlit run app.py
 ```
 
-Streamlit opens <http://localhost:8501> in your browser. On first launch the classifier is trained (a few seconds) and, if installed, the EasyOCR model is downloaded (once).
+Streamlit opens <http://localhost:8501> in your browser. On first launch the classifier is trained (a few seconds) and, if installed, the RapidOCR model is loaded (once).
 
 ### Analyse your first CVs
 
@@ -98,7 +100,7 @@ ui.py                        Design system: colours, Lucide icons, CSS, HTML com
 gestionnaire_email.py        IMAP client: fetch CV attachments, move processed emails
 CLASSEURS.py                 Older standalone version of the app (no email/validation pages), kept for reference
 test_email.py                Checks the IMAP connection using .streamlit/secrets.toml
-test_easyocr.py              Runs EasyOCR on the first CV of a folder: python test_easyocr.py [folder]
+test_ocr.py              Runs RapidOCR on the first CV of a folder: python test_ocr.py [folder]
 debug_cv.py                  Shows how name detection behaves on one PDF: python debug_cv.py file.pdf
 apprentissage.json           Learned corrections
 .streamlit/secrets.toml.example   Template for mailbox credentials
@@ -106,7 +108,7 @@ apprentissage.json           Learned corrections
 
 ## How classification works
 
-1. **Text extraction** — PyMuPDF for PDFs, python-docx for DOCX; if fewer than 300 characters are found, EasyOCR is used (when installed).
+1. **Text extraction** — PyMuPDF for PDFs, python-docx for DOCX; if fewer than 300 characters are found, RapidOCR is used (when installed).
 2. **Information extraction** — regex/heuristics in `ExtracteurInfos` (`app.py`).
 3. **Classification** — first looks for known job titles in the top 15 lines of the CV, then anywhere in the text, then falls back to a TF-IDF + Naive Bayes model trained on the keywords of each domain in `CATEGORIES`.
 4. **Score /100** — diploma (30) + experience (40) + profile completeness (30).
@@ -118,6 +120,6 @@ To add or tune domains and jobs, edit the `CATEGORIES` dictionary at the top of 
 ## Troubleshooting
 
 - **`❌ Impossible de lire les identifiants`** on the Emails page → `.streamlit/secrets.toml` is missing or incomplete (see above).
-- **Scanned CVs come back empty** → `easyocr` is not installed; run `pip install easyocr`.
+- **Scanned CVs come back empty** → `rapidocr-onnxruntime` is not installed; run `pip install rapidocr-onnxruntime`.
 - **`.doc` files** (old Word format) are not supported for text extraction; convert them to `.docx` or PDF.
-- **Slow first run** → EasyOCR downloads its models once; later runs are faster.
+- **Slow first run** → the RapidOCR model is loaded on first use; later runs are faster.
