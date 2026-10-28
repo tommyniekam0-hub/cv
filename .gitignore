@@ -1,0 +1,27 @@
+# Secrets
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Données générées par l'application
+/cv_a_traiter
+/cv_recus_email
+/CV_classes
+/CV_filtres
+/CV_tries
+/CV_tries_V3
+/CV_tries_V4
+/exports
+/exports_excel_V3
+/exports_V4
+/historique
+/rapports
+/rapports_V3
+/tesseract_portable
+
+# Divers
+.DS_Store
