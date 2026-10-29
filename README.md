@@ -10,7 +10,7 @@ The user interface is in French.
 |------|--------------|
 | **Accueil** | Home page, shortcut to pick a CV folder |
 | **Analyser** | Analyses every CV in a local folder (default: `cv_a_traiter/`) with live progress and log |
-| **Emails** | Connects to an IMAP mailbox, downloads CV attachments (`.pdf`, `.docx`, `.doc`), analyses them and moves processed emails to a `CV traités` folder |
+| **Emails** | Connects to an IMAP mailbox, downloads CV attachments (`.pdf`, `.docx`, `.doc`), analyses them and moves processed emails to a `CV traités` folder (an email whose CV can't be read, e.g. an old `.doc`, stays in the inbox) |
 | **Résultats** | Totals, breakdown by domain, Excel export |
 | **Filtrer** | Domain, minimum experience, education level, skills, free-text search (plus sex/city/age under "Plus de critères"); export or save the selection to a folder |
 | **Validation** | Queue of low-confidence CVs: pick one of the model's suggested domains (with probabilities) or another one, and optionally learn from the decision |
@@ -89,7 +89,7 @@ All created next to `app.py` and git-ignored:
 | `CV_filtres/` | Folders created from the **Filtrer** page |
 | `exports/` | Excel exports |
 
-`apprentissage.json` stores what the app learned from your corrections (first name → sex, etc.).
+`apprentissage.json` stores what the app learned from your corrections (first name → sex, validated CV texts, etc.). It contains extracts of CVs (personal data), so it is git-ignored too.
 
 ## Project structure
 
@@ -102,7 +102,6 @@ CLASSEURS.py                 Older standalone version of the app (no email/valid
 test_email.py                Checks the IMAP connection using .streamlit/secrets.toml
 test_ocr.py              Runs RapidOCR on the first CV of a folder: python test_ocr.py [folder]
 debug_cv.py                  Shows how name detection behaves on one PDF: python debug_cv.py file.pdf
-apprentissage.json           Learned corrections
 .streamlit/secrets.toml.example   Template for mailbox credentials
 ```
 

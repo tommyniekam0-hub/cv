@@ -26,3 +26,6 @@ venv/
 
 # Divers
 .DS_Store
+
+# Apprentissage : contient des extraits de CV (données personnelles)
+/apprentissage.json

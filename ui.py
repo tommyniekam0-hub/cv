@@ -5,6 +5,8 @@
 # ============================================================
 
 import base64
+import io
+import os
 import zlib
 from html import escape
 
@@ -91,11 +93,56 @@ def _icone_masque(nom):
     return _data_uri(_svg(nom, "black"))
 
 
-_LOGO_CIBLE = '''<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40" fill="none">
-<circle cx="11" cy="8.5" r="4.5" fill="#E3222F"/>
-<path d="M6.5 34C7.5 23 13 17 21.5 15.5" stroke="#E3222F" stroke-width="5" stroke-linecap="round"/>
-<path d="M20 34C21.5 26 26.5 21.5 34 20.5" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round"/>
-</svg>'''
+# Logo Cible RH (fichier logo.png à côté de l'application)
+FICHIER_LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+
+
+def _masque_contenu(image):
+    """Pixels qui ne sont pas (presque) blancs : le fond du PNG n'est pas parfaitement blanc"""
+    from PIL import ImageOps
+    return ImageOps.invert(image.convert("L")).point(lambda v: 255 if v > 40 else 0)
+
+
+def _charger_logo():
+    """Logo recadré sur son contenu (sans les marges blanches), ou None si le fichier manque"""
+    try:
+        from PIL import Image
+        image = Image.open(FICHIER_LOGO).convert("RGB")
+        cadre = _masque_contenu(image).getbbox()  # zone non blanche
+        return image.crop(cadre) if cadre else image
+    except Exception:
+        return None
+
+
+def logo_icone():
+    """Icône d'onglet : le cercle du logo, sur fond carré (le logo entier est trop large)"""
+    logo = _charger_logo()
+    if logo is None:
+        return "🎯"
+    from PIL import Image
+    inverse = _masque_contenu(logo)
+    # Le cercle s'arrête à la première colonne entièrement blanche
+    largeur = next((x for x in range(1, logo.width)
+                    if inverse.crop((x, 0, x + 1, logo.height)).getbbox() is None), logo.width)
+    cercle = logo.crop((0, 0, largeur, logo.height))
+    cercle = cercle.crop(_masque_contenu(cercle).getbbox() or (0, 0, largeur, logo.height))
+    cote = max(cercle.size)
+    carre = Image.new("RGB", (cote, cote), "white")
+    carre.paste(cercle, ((cote - cercle.width) // 2, (cote - cercle.height) // 2))
+    return carre
+
+
+def _logo_marque():
+    logo = _charger_logo()
+    if logo is None:
+        return '<div class="cv-marque-nom">CIBLE RH</div>'
+    tampon = io.BytesIO()
+    logo.save(tampon, format="PNG")
+    src = "data:image/png;base64," + base64.b64encode(tampon.getvalue()).decode("ascii")
+    return f'<div class="cv-marque-logo"><img src="{src}" alt="Cible RH Emploi"></div>'
+
+
+LOGO_MARQUE = _logo_marque()
 
 _LOGO_CVSMART = f'''<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none" stroke="{BLEU}" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round">
 <path d="M38 5H13a3 3 0 0 0-3 3v48a3 3 0 0 0 3 3h20"/><path d="M38 5l12 12v14"/><path d="M38 5v12h12"/>
@@ -103,7 +150,6 @@ _LOGO_CVSMART = f'''<svg xmlns="http://www.w3.org/2000/svg" width="64" height="6
 <circle cx="46" cy="49" r="11" fill="{ROUGE}" stroke="#FFFFFF" stroke-width="3"/>
 <path d="m40.5 49 4 4 7-7.5" stroke="#FFFFFF" stroke-width="3.5"/>
 </svg>'''
-LOGO_CIBLE = image_svg(_LOGO_CIBLE, 36, "CIBLE RH")
 LOGO_CVSMART = image_svg(_LOGO_CVSMART, 76, "CVSmart")
 
 # ============================================================
@@ -188,9 +234,10 @@ html, body, .stApp *:not([data-testid="stIconMaterial"]) {{
 [data-testid="stSidebarUserContent"] > div {{ width: 100% !important; }}
 [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{ gap: 0.35rem; width: 100% !important; }}
 [data-testid="stSidebar"] [data-testid="stElementContainer"], [class*="st-key-nav_"] .stButton {{ width: 100% !important; }}
-.cv-marque {{ display: flex; align-items: center; gap: 0.6rem; padding: 0 0.5rem 1rem 0.5rem; color: #fff; }}
+.cv-marque {{ padding: 0 0.5rem 1rem 0.5rem; color: #fff; }}
 .cv-marque-nom {{ font-weight: 800; font-size: 1.05rem; line-height: 1.1; }}
-.cv-marque-sous {{ font-size: 0.85rem; opacity: 0.9; }}
+.cv-marque-logo {{ background: #fff; border-radius: 12px; padding: 0.6rem 0.8rem; }}
+.cv-marque-logo img {{ display: block; width: 100%; height: auto; }}
 .cv-pied {{ position: fixed; bottom: 1.4rem; left: 1.3rem; color: rgba(255,255,255,0.85); font-size: 0.78rem; line-height: 1.5; }}
 [class*="st-key-nav_"] button {{
     width: 100% !important; background: transparent !important; border: none !important; color: #fff !important;

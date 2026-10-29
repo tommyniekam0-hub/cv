@@ -8,6 +8,8 @@ import os
 import re
 import json
 import shutil
+import hashlib
+import unicodedata
 import warnings
 from pathlib import Path
 from datetime import datetime
@@ -35,11 +37,11 @@ from html import escape
 # ============================================================
 st.set_page_config(
     page_title="CVSmart - L'intelligence qui trie vos talents",
-    page_icon="Logo_Cible-rh.png",
+    page_icon=ui.logo_icone(),
     layout="wide",
     initial_sidebar_state="expanded"
 )
-VERSION_APP = "1.0"
+VERSION_APP = "1.2"
 
 # ============================================================
 # 50 DOMAINES AVEC MÉTIERS
@@ -533,12 +535,6 @@ FICHIER_APPRENTISSAGE = "apprentissage.json"
 FICHIER_CONFIG_EMAIL = "config_email.json"
 SEUIL_CONFIANCE_DEFAUT = 70
 
-SEUILS_CHAMPS = {
-    'nom': 70, 'prenom': 70, 'email': 80, 'telephone': 80,
-    'sexe': 80, 'age': 75, 'niveau_etudes': 70, 'ville': 70,
-    'domaine': 70, 'metier': 60,
-}
-
 # ============================================================
 # EXTRACTEUR
 # ============================================================
@@ -708,173 +704,92 @@ class ExtracteurInfos:
                 pts, meilleur = points, niv
         return meilleur, pts
     
+    # Titres de section : on ignore les dates de la partie formation
+    TITRE_FORMATION = re.compile(
+        r"^\W*(formations?|[ée]ducation|[ée]tudes|dipl[ôo]mes?|cursus|"
+        r"parcours\s+(?:acad[ée]mique|scolaire|universitaire))\b", re.IGNORECASE)
+    TITRE_EXPERIENCE = re.compile(
+        r"^\W*(exp[ée]riences?|parcours\s+professionnel|emplois?|stages?)\b", re.IGNORECASE)
+    TITRE_AUTRE = re.compile(
+        r"^\W*(comp[ée]tences|langues|certifications?|loisirs|centres?\s+d'int[ée]r[êe]ts?|"
+        r"r[ée]f[ée]rences|projets|profil)\b", re.IGNORECASE)
+    MOTS_ETUDES = re.compile(
+        r"\b(master|licence|bachelor|baccalaur[ée]at|bac|bts|dut|doctorat|universit[ée]|[ée]cole|"
+        r"lyc[ée]e|coll[èe]ge|dipl[ôo]me|[ée]tudiant|gce|mba)\b", re.IGNORECASE)
+    MOTS_PRESENT = r"aujourd'hui|aujourd’hui|ce\s+jour|pr[ée]sent|present|maintenant|en\s+cours|now"
+    PLAGE_DATES = re.compile(
+        r"(?:\d{1,2}[/.]\s*)?(19\d{2}|20\d{2})\s*(?:-|–|—|\bà\b|\ba\b|\bau\b)\s*"
+        r"(?:\d{1,2}[/.]\s*)?(19\d{2}|20\d{2}|" + MOTS_PRESENT + r")", re.IGNORECASE)
+    DEPUIS = re.compile(r"\bdepuis\s+(?:\w+\s+)?(19\d{2}|20\d{2})", re.IGNORECASE)
+
     def extraire_experience(self, texte):
         """
-        Calcule les années d'expérience :
-        1. "X ans d'expérience" → direct
-        2. Plage de dates (2018-2023) → 5 ans
-        3. "Depuis 2018" → 2026 - 2018
-        4. Sinon → 0
+        Années d'expérience professionnelle :
+        1. "X ans d'expérience" écrit dans le CV → valeur directe
+        2. Sinon, somme des périodes de travail (2018-2023, depuis 2019…),
+           sans compter la partie formation et en fusionnant les périodes qui se chevauchent
         """
         annee_actuelle = datetime.now().year
-        durees = []
-        
-        # MÉTHODE 1 : "X ans d'expérience" (direct)
-        for m in re.finditer(r'(\d{1,2})\s*(?:ans?|années?)\s*(?:d\'?\s*)?(?:expérience|exp)', texte, re.IGNORECASE):
-            try:
+
+        # 1. Valeur explicite
+        explicites = []
+        for p in [r"(\d{1,2})\s*\+?\s*(?:ans?|années?)\s*(?:d['’]\s*|de\s+)?(?:expérience|exp\b)",
+                  r"expérience\s*(?:de|d['’])\s*(\d{1,2})\s*(?:ans?|années?)"]:
+            for m in re.finditer(p, texte, re.IGNORECASE):
                 v = int(m.group(1))
-                if 0 <= v <= 50:
-                    durees.append(v)
-            except: pass
-        
-        for m in re.finditer(r'expérience\s*(?:de|d\')\s*(\d{1,2})\s*(?:ans?|années?)', texte, re.IGNORECASE):
-            try:
-                v = int(m.group(1))
-                if 0 <= v <= 50:
-                    durees.append(v)
-            except: pass
-        
-        # MÉTHODE 2 : Plages de dates "2018-2023" ou "2018 - 2023" ou "2018 à 2023"
-        periodes = re.findall(
-            r'(19\d{2}|20\d{2})\s*[-–—à]+\s*(19\d{2}|20\d{2}|aujourd\'hui|présent|present|maintenant)',
-            texte, re.IGNORECASE
-        )
-        for debut, fin in periodes:
-            try:
+                if 0 < v <= 50:
+                    explicites.append(v)
+        if explicites:
+            return max(explicites)
+
+        # 2. Périodes de travail (hors section formation et lignes de diplômes)
+        periodes = []
+        section = None  # 'formation', 'experience' ou 'autre'
+        titres = [('formation', self.TITRE_FORMATION), ('experience', self.TITRE_EXPERIENCE),
+                  ('autre', self.TITRE_AUTRE)]
+        for ligne in texte.split('\n'):
+            if len(ligne.strip()) <= 40:
+                titre = next((nom for nom, motif in titres if motif.match(ligne)), None)
+                if titre:
+                    section = titre
+                    continue
+            if section == 'formation':
+                continue
+            # Hors section "Expériences", une ligne qui parle de diplôme/école est une formation
+            if section != 'experience' and self.MOTS_ETUDES.search(ligne):
+                continue
+            for debut, fin in self.PLAGE_DATES.findall(ligne):
                 d = int(debut)
-                if fin.lower() in ["aujourd'hui", 'présent', 'present', 'maintenant']:
-                    f = annee_actuelle
-                else:
-                    f = int(fin)
-                if 1950 <= d < f <= annee_actuelle + 1:
-                    durees.append(f - d)
-            except: pass
-        
-        # MÉTHODE 3 : "Depuis 2018" ou "Depuis 2018 à ce jour"
-        for m in re.finditer(r'depuis\s+(19\d{2}|20\d{2})', texte, re.IGNORECASE):
-            try:
+                f = int(fin) if fin.isdigit() else annee_actuelle
+                if 1950 <= d <= f <= annee_actuelle + 1:
+                    periodes.append((d, max(f, d)))
+            for m in self.DEPUIS.finditer(ligne):
                 d = int(m.group(1))
                 if 1950 <= d <= annee_actuelle:
-                    durees.append(annee_actuelle - d)
-            except: pass
-        
-        # MÉTHODE 4 : "De 2015 à 2020"
-        for m in re.finditer(r'de\s+(19\d{2}|20\d{2})\s+(?:à|a)\s+(19\d{2}|20\d{2})', texte, re.IGNORECASE):
-            try:
-                d = int(m.group(1))
-                f = int(m.group(2))
-                if 1950 <= d < f <= annee_actuelle + 1:
-                    durees.append(f - d)
-            except: pass
-        
-        # Si rien trouvé → 0
-        if not durees:
+                    periodes.append((d, annee_actuelle))
+
+        if not periodes:
             return 0
-        
-        # Filtrer les valeurs aberrantes (> 50 ans)
-        durees = [d for d in durees if 0 <= d <= 50]
-        if not durees:
-            return 0
-        
-        # Retourner la MÉDIANE (plus fiable que la moyenne)
-        return int(np.median(durees))
-    
+        # Fusion des périodes qui se chevauchent puis somme
+        periodes.sort()
+        total, (cour_d, cour_f) = 0, periodes[0]
+        for d, f in periodes[1:]:
+            if d <= cour_f:
+                cour_f = max(cour_f, f)
+            else:
+                total += cour_f - cour_d
+                cour_d, cour_f = d, f
+        total += cour_f - cour_d
+        return min(total, 50)
+
     def extraire_age(self, texte):
-        """Extrait l'âge : par année de naissance sinon RAS"""
-        annee_actuelle = datetime.now().year
-        ages_trouves = []
-        
-        # MÉTHODE 1 : "Né(e) le 15/03/1995" ou "Né le 15-03-1995"
-        for m in re.finditer(r'(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})', texte):
-            try:
-                annee_naiss = int(m.group(3))
-                if 1940 <= annee_naiss <= annee_actuelle:
-                    age = annee_actuelle - annee_naiss
-                    if 15 <= age <= 85:
-                        ages_trouves.append((age, 0.98))
-            except: pass
-        
-        # MÉTHODE 2 : "Né(e) en 1995" ou "Née en 1995"
-        for m in re.finditer(r'n[ée]e?\s+(?:le\s+\d{1,2}[/\-.]\d{1,2}[/\-.]|en\s+)?(19\d{2}|20\d{2})', texte, re.IGNORECASE):
-            try:
-                annee_naiss = int(m.group(1))
-                if 1940 <= annee_naiss <= annee_actuelle:
-                    age = annee_actuelle - annee_naiss
-                    if 15 <= age <= 85:
-                        ages_trouves.append((age, 0.95))
-            except: pass
-        
-        # MÉTHODE 3 : "Date de naissance : 1995"
-        for m in re.finditer(r'date\s+de\s+naissance\s*[:\-]?\s*\d{0,2}[/\-.]?\d{0,2}[/\-.]?(19\d{2}|20\d{2})', texte, re.IGNORECASE):
-            try:
-                annee_naiss = int(m.group(1))
-                if 1940 <= annee_naiss <= annee_actuelle:
-                    age = annee_actuelle - annee_naiss
-                    if 15 <= age <= 85:
-                        ages_trouves.append((age, 0.97))
-            except: pass
-        
-        # MÉTHODE 4 : "J'ai 28 ans" ou "28 ans"
-        for m in re.finditer(r"j['']?ai\s+(\d{1,2})\s*ans", texte, re.IGNORECASE):
-            try:
-                age = int(m.group(1))
-                if 15 <= age <= 85:
-                    ages_trouves.append((age, 0.90))
-            except: pass
-        
-        # MÉTHODE 5 : "Âge : 28" ou "Age : 28"
-        for m in re.finditer(r'[âa]ge\s*[:\-]\s*(\d{1,2})', texte, re.IGNORECASE):
-            try:
-                age = int(m.group(1))
-                if 15 <= age <= 85:
-                    ages_trouves.append((age, 0.95))
-            except: pass
-        
-        # MÉTHODE 6 : "(28 ans)" entre parenthèses
-        for m in re.finditer(r'\((\d{1,2})\s*ans\)', texte, re.IGNORECASE):
-            try:
-                age = int(m.group(1))
-                if 15 <= age <= 85:
-                    ages_trouves.append((age, 0.85))
-            except: pass
-        
-        # Si rien trouvé → RAS (ne PAS inventer)
-        if not ages_trouves:
-            return "RAS"
-        
-        # Prendre la valeur avec la meilleure confiance
-        ages_trouves.sort(key=lambda x: x[1], reverse=True)
-        return str(ages_trouves[0][0])
-    
+        """Âge du candidat (RAS si introuvable : on n'invente pas)"""
+        return calculer_age_depuis_annee(texte)[0]
+
     def extraire_sexe(self, texte, prenom="RAS"):
-        """Détermine le sexe : civilité > prénom connu > RAS"""
-        t = texte.lower()
-        
-        # PRIORITÉ 1 : Civilité explicite (99% confiance)
-        if re.search(r'\b(madame|mme|mlle|mademoiselle)\b', t):
-            return "Femme"
-        if re.search(r'\b(monsieur|mr)\b', t):
-            return "Homme"
-        
-        # PRIORITÉ 2 : Prénom connu
-        if prenom and prenom != "RAS":
-            for p in prenom.lower().split():
-                p = p.strip()
-                if p in self.PRENOMS_FEMININS:
-                    return "Femme"
-                if p in self.PRENOMS_MASCULINS:
-                    return "Homme"
-        
-        # PRIORITÉ 3 : Chercher d'autres indices
-        # "épouse", "mariée", "mère de"
-        if re.search(r'\b(épouse|mari[ée]e|m[èe]re\s+de|elle)\b', t):
-            return "Femme"
-        if re.search(r'\b(époux|marié|p[èe]re\s+de|il\s+est)\b', t):
-            return "Homme"
-        
-        # Sinon → RAS (prénom ambigu)
-        return "RAS"
-    
+        """Sexe du candidat : civilité > prénom connu > indices grammaticaux > RAS"""
+        return determiner_sexe_avec_confiance(texte, prenom)[0]
+
     def extraire_situation(self, texte):
         t = texte.lower()
         # "mariée?" exige l'accent pour ne pas confondre avec le prénom "Marie"
@@ -986,47 +901,52 @@ class ExtracteurInfos:
 # ============================================================
 # MODULE : ÂGE CALCULÉ + SEXE CONFIANCE
 # ============================================================
+# Une date n'est une date de naissance que si elle suit "né(e) le", "date de naissance"…
+# (sinon les dates d'expérience comme "01/09/2018" donnaient des âges absurdes)
+_CONTEXTE_NAISSANCE = (r"(?:(?<!\w)n[ée]\(?e?\)?\s+(?:le\s+|en\s+|à\s+\S+\s+le\s+)?"
+                       r"|date\s+de\s+naissance\s*[:\-]?\s*|naissance\s*[:\-]\s*)")
+_DATE_NAISSANCE = re.compile(
+    _CONTEXTE_NAISSANCE + r"(?:\d{1,2}\s*[/\-.]\s*\d{1,2}\s*[/\-.]\s*|\d{1,2}(?:er)?\s+[a-zéû]+\s+)?(19\d{2}|20\d{2})",
+    re.IGNORECASE)
+_AGES_DIRECTS = [
+    (re.compile(r"j['’]?ai\s+(\d{1,2})\s*ans", re.IGNORECASE), 0.90),
+    (re.compile(r"(?<!\w)[âa]ge\s*[:\-]\s*(\d{1,2})\b", re.IGNORECASE), 0.95),  # pas "stage : 6 mois"
+    (re.compile(r"\((\d{1,2})\s*ans\)", re.IGNORECASE), 0.80),
+]
+
+
 def calculer_age_depuis_annee(texte):
+    """Âge du candidat et confiance : ("28", 0.98) ou ("RAS", 0.0)"""
     annee_actuelle = datetime.now().year
     ages_candidats = []
-    for m in re.finditer(r'n[ée]e?\s*(?:le|en)?\s*(19\d{2}|20\d{2})', texte, re.IGNORECASE):
-        try:
-            age = annee_actuelle - int(m.group(1))
-            if 16 <= age <= 80: ages_candidats.append((age, 0.95))
-        except: pass
-    for m in re.finditer(r'(\d{2})[/\-.](\d{2})[/\-.](\d{4})', texte):
-        try:
-            annee_naiss = int(m.group(3))
-            if 1950 <= annee_naiss <= annee_actuelle:
-                age = annee_actuelle - annee_naiss
-                if 16 <= age <= 80: ages_candidats.append((age, 0.98))
-        except: pass
-    for m in re.finditer(r"j['']?ai\s*(\d{1,2})\s*ans", texte, re.IGNORECASE):
-        try:
+    for m in _DATE_NAISSANCE.finditer(texte):
+        age = annee_actuelle - int(m.group(1))
+        if 15 <= age <= 85: ages_candidats.append((age, 0.98))
+    for motif, confiance in _AGES_DIRECTS:
+        for m in motif.finditer(texte):
             age = int(m.group(1))
-            if 16 <= age <= 80: ages_candidats.append((age, 0.90))
-        except: pass
-    for m in re.finditer(r'[âa]ge\s*[:\-]\s*(\d{1,2})', texte, re.IGNORECASE):
-        try:
-            age = int(m.group(1))
-            if 16 <= age <= 80: ages_candidats.append((age, 0.95))
-        except: pass
+            if 15 <= age <= 85: ages_candidats.append((age, confiance))
     if not ages_candidats: return "RAS", 0.0
     ages_candidats.sort(key=lambda x: x[1], reverse=True)
     return str(ages_candidats[0][0]), ages_candidats[0][1]
 
 
 def determiner_sexe_avec_confiance(texte, prenom="RAS"):
+    """Sexe et confiance. Les pronoms "il"/"elle" ne sont pas utilisés (trop fréquents dans un texte)."""
     t = texte.lower()
-    if re.search(r'\b(madame|mme|mlle|mademoiselle)\b', t): return "Femme", 0.99
-    if re.search(r'\b(monsieur|mr)\b', t): return "Homme", 0.99
-    # Le prénom (0.90) passe avant les indices faibles (0.85)
+    # Civilité dans l'en-tête du CV seulement (pas dans les références : "Contact : Mr X")
+    entete = " ".join([l for l in t.split('\n') if l.strip()][:8])
+    if re.search(r'\b(madame|mme|mlle|mademoiselle)\b', entete): return "Femme", 0.99
+    if re.search(r'\b(monsieur|mr)\b', entete): return "Homme", 0.99
     if prenom and prenom != "RAS":
         for p in prenom.lower().split():
             if p in ExtracteurInfos.PRENOMS_FEMININS: return "Femme", 0.90
             if p in ExtracteurInfos.PRENOMS_MASCULINS: return "Homme", 0.90
-    if re.search(r'\b(elle|mari[ée]e|épouse|mère\s+de)\b', t): return "Femme", 0.85
-    if re.search(r'\b(il|marié|époux|p[èe]re\s+de)\b', t): return "Homme", 0.85
+    # Accords grammaticaux : "née le", "mariée" (mais pas la formule neutre "marié(e)")
+    if re.search(r'(?<!\w)née\s+(?:le|en|à)\b', t): return "Femme", 0.90
+    if re.search(r'(?<!\w)né\s+(?:le|en|à)\b', t): return "Homme", 0.90
+    if re.search(r'\b(mariée|épouse|m[èe]re\s+de)\b', t): return "Femme", 0.85
+    if re.search(r'\b(époux|p[èe]re\s+de)\b|\bmarié\b(?!\s*\(e\))', t): return "Homme", 0.85
     return "RAS", 0.0
 
 
@@ -1151,13 +1071,14 @@ def appliquer_apprentissage(infos, app):
     return infos
 
 
-def enregistrer_correction(app, champ, ancienne, nouvelle, prenom="RAS"):
+def enregistrer_correction(app, champ, ancienne, nouvelle, prenom="RAS", sauvegarder=True):
     if not nouvelle or nouvelle == ancienne: return app
     # On apprend l'association prénom → sexe (clé = prénom, pas l'ancienne valeur)
     if champ == 'sexe' and nouvelle != 'RAS' and prenom and prenom != 'RAS':
         app.setdefault('sexe', {})[prenom.lower().strip()] = nouvelle
     app['stats']['total_corrections'] = app['stats'].get('total_corrections', 0) + 1
-    sauvegarder_apprentissage(app)
+    if sauvegarder:
+        sauvegarder_apprentissage(app)
     return app
 
 
@@ -1200,15 +1121,6 @@ def stats_decisions(app):
         'recentes': corrections[-5:][::-1],
     }
 
-
-def get_stats_apprentissage(app):
-    return {
-        'sexe_appris': len(app.get('sexe', {})),
-        'domaines_appris': len(app.get('domaines', {})),
-        'metiers_appris': len(app.get('metiers', {})),
-        'total_corrections': app.get('stats', {}).get('total_corrections', 0),
-        'derniere_maj': app.get('stats', {}).get('derniere_maj', 'Jamais')
-    }
 
 # ============================================================
 # CLASSIFICATEUR INTELLIGENT
@@ -1275,73 +1187,14 @@ class Classificateur:
         if proche:
             return proche[0], 'RAS', proche[1]
         
-        # 1. Chercher LE POSTE dans les 15 premières lignes
+        # 1. Chercher LE POSTE dans les 15 premières lignes, puis dans tout le texte
         lignes = [l.strip() for l in texte.split('\n') if l.strip()]
         zone_titre = " ".join(lignes[:15]).lower()
-        
-        METIERS_PRIORITAIRES = {
-            'logisticien': ('Logistique et Transport', 'Logisticien'),
-            'magasinier': ('Logistique et Transport', 'Magasinier'),
-            'gestionnaire de stock': ('Logistique et Transport', 'Gestionnaire de stock'),
-            'transitaire': ('Logistique et Transport', 'Transitaire'),
-            'chauffeur': ('Logistique et Transport', 'Chauffeur'),
-            'chef de dépôt': ('Logistique et Transport', 'Chef de dépôt'),
-            'directeur général adjoint': ('Direction Générale', 'Directeur Général Adjoint'),
-            'directeur général': ('Direction Générale', 'Directeur Général'),
-            'dga': ('Direction Générale', 'Directeur Général Adjoint'),
-            'dg': ('Direction Générale', 'Directeur Général'),
-            'développeur': ('Informatique', 'Développeur'),
-            'administrateur réseau': ('Informatique', 'Administrateur réseau'),
-            'devops': ('Informatique', 'DevOps'),
-            'data scientist': ('Informatique', 'Data Scientist'),
-            'comptable': ('Comptabilité', 'Comptable'),
-            'auditeur': ('Comptabilité', 'Auditeur'),
-            'expert-comptable': ('Comptabilité', 'Expert-comptable'),
-            'analyste financier': ('Finance', 'Analyste financier'),
-            'ressources humaines': ('Ressources Humaines', 'Chargé RH'),
-            'recruteur': ('Ressources Humaines', 'Recruteur'),
-            'drh': ('Ressources Humaines', 'DRH'),
-            'marketing digital': ('Marketing', 'Marketing digital'),
-            'community manager': ('Marketing', 'Marketing digital'),
-            'commercial': ('Commercial et Vente', 'Commercial'),
-            'médecin': ('Santé et Médical', 'Médecin'),
-            'infirmier': ('Santé et Médical', 'Infirmier'),
-            'enseignant': ('Enseignement', 'Enseignant'),
-            'formateur': ('Formation professionnelle', 'Formateur'),
-            'maçon': ('BTP et Construction', 'Maçon'),
-            'ingénieur': ('Génie Civil', 'Ingénieur civil'),
-            'qhse': ('QHSE', 'Responsable QHSE'),
-            'mécanicien': ('Mécanique Auto', 'Mécanicien auto'),
-            'vidangeur': ('Mécanique Auto', 'Vidangeur'),
-            'agent de sécurité': ('Sécurité', 'Agent de sécurité'),
-            'cuisinier': ('Hôtellerie et Restauration', 'Cuisinier'),
-            'serveur': ('Hôtellerie et Restauration', 'Serveur'),
-            'secrétaire': ('Administration', 'Secrétaire'),
-            'juriste': ('Droit et Juridique', 'Juriste'),
-            'architecte': ('Architecture et Urbanisme', 'Architecte'),
-        }
-        
-        metiers_trouves = []
-        for mot_cle, (domaine, metier) in METIERS_PRIORITAIRES.items():
-            if mot_cle in zone_titre:
-                pos = zone_titre.find(mot_cle)
-                contexte = zone_titre[max(0, pos-30):pos+len(mot_cle)+30]
-                if not any(neg in contexte for neg in ['pas de ', 'non ', 'aucun ']):
-                    metiers_trouves.append((domaine, metier, len(mot_cle)))
-        
-        if metiers_trouves:
-            metiers_trouves.sort(key=lambda x: x[2], reverse=True)
-            return metiers_trouves[0][0], metiers_trouves[0][1], 0.85
-        
-        metiers_trouves = []
-        for mot_cle, (domaine, metier) in METIERS_PRIORITAIRES.items():
-            if mot_cle in t:
-                metiers_trouves.append((domaine, metier, len(mot_cle)))
-        
-        if metiers_trouves:
-            metiers_trouves.sort(key=lambda x: x[2], reverse=True)
-            return metiers_trouves[0][0], metiers_trouves[0][1], 0.7
-        
+        for zone, confiance in [(zone_titre, 0.85), (t, 0.7)]:
+            trouve = chercher_metier(zone)
+            if trouve:
+                return trouve[0], trouve[1], confiance
+
         try:
             t_clean = re.sub(r'\s+', ' ', t)
             pred = self.pipeline.predict([t_clean])[0]
@@ -1350,6 +1203,96 @@ class Classificateur:
             return pred, 'RAS', proba
         except:
             return 'Non classé', 'RAS', 0.0
+
+
+# Postes reconnus directement dans le CV : mot-clé → (domaine, métier).
+# Les mots-clés sont cherchés en mots entiers, le plus long d'abord
+# ("ingénieur génie civil" passe avant "ingénieur civil").
+METIERS_PRIORITAIRES = {
+    'logisticien': ('Logistique et Transport', 'Logisticien'),
+    'magasinier': ('Logistique et Transport', 'Magasinier'),
+    'gestionnaire de stock': ('Logistique et Transport', 'Gestionnaire de stock'),
+    'transitaire': ('Logistique et Transport', 'Transitaire'),
+    'chauffeur': ('Logistique et Transport', 'Chauffeur'),
+    'chef de dépôt': ('Logistique et Transport', 'Chef de dépôt'),
+    'directeur général adjoint': ('Direction Générale', 'Directeur Général Adjoint'),
+    'directeur général': ('Direction Générale', 'Directeur Général'),
+    'dga': ('Direction Générale', 'Directeur Général Adjoint'),
+    'dg': ('Direction Générale', 'Directeur Général'),
+    'développeur': ('Informatique', 'Développeur'),
+    'ingénieur informatique': ('Informatique', 'Développeur'),
+    'ingénieur logiciel': ('Informatique', 'Développeur'),
+    'architecte logiciel': ('Informatique', 'Développeur'),
+    'architecte cloud': ('Informatique', 'DevOps'),
+    'administrateur réseau': ('Informatique', 'Administrateur réseau'),
+    'administrateur système': ('Informatique', 'Administrateur réseau'),
+    'devops': ('Informatique', 'DevOps'),
+    'data scientist': ('Informatique', 'Data Scientist'),
+    'comptable': ('Comptabilité', 'Comptable'),
+    'auditeur': ('Comptabilité', 'Auditeur'),
+    'expert-comptable': ('Comptabilité', 'Expert-comptable'),
+    'analyste financier': ('Finance', 'Analyste financier'),
+    'ressources humaines': ('Ressources Humaines', 'Chargé RH'),
+    'recruteur': ('Ressources Humaines', 'Recruteur'),
+    'drh': ('Ressources Humaines', 'DRH'),
+    'marketing digital': ('Marketing', 'Marketing digital'),
+    'community manager': ('Marketing', 'Marketing digital'),
+    'commercial': ('Commercial et Vente', 'Commercial'),
+    'médecin': ('Santé et Médical', 'Médecin'),
+    'infirmier': ('Santé et Médical', 'Infirmier'),
+    'infirmière': ('Santé et Médical', 'Infirmier'),
+    'enseignant': ('Enseignement', 'Enseignant'),
+    'formateur': ('Formation professionnelle', 'Formateur'),
+    'maçon': ('BTP et Construction', 'Maçon'),
+    # "ingénieur" seul est trop vague (il envoyait tout le monde en Génie Civil) :
+    # on ne garde que les spécialités, le reste est laissé au modèle
+    'ingénieur civil': ('Génie Civil', 'Ingénieur civil'),
+    'ingénieur génie civil': ('Génie Civil', 'Ingénieur civil'),
+    'ingénieur structure': ('Génie Civil', 'Ingénieur civil'),
+    'ingénieur électrique': ('Génie Électrique', 'Ingénieur électrique'),
+    'ingénieur électricité': ('Génie Électrique', 'Ingénieur électrique'),
+    'ingénieur mécanique': ('Génie Mécanique', 'Ingénieur mécanique'),
+    'ingénieur procédés': ('Génie des Procédés', 'Ingénieur procédés'),
+    'ingénieur chimiste': ('Génie des Procédés', 'Ingénieur chimiste'),
+    'ingénieur télécom': ('Télécommunications', 'Ingénieur télécom'),
+    'ingénieur télécommunications': ('Télécommunications', 'Ingénieur télécom'),
+    'ingénieur pétrole': ('Énergie et Pétrole', 'Ingénieur pétrole'),
+    'ingénieur agronome': ('Agriculture', 'Agronome'),
+    'qhse': ('QHSE', 'Responsable QHSE'),
+    'mécanicien auto': ('Mécanique Auto', 'Mécanicien auto'),
+    'mécanicien industriel': ('Génie Mécanique', 'Technicien mécanique'),
+    'mécanicien': ('Mécanique Auto', 'Mécanicien auto'),
+    'vidangeur': ('Mécanique Auto', 'Vidangeur'),
+    'agent de sécurité': ('Sécurité', 'Agent de sécurité'),
+    'cuisinier': ('Hôtellerie et Restauration', 'Cuisinier'),
+    'serveur': ('Hôtellerie et Restauration', 'Serveur'),
+    'serveuse': ('Hôtellerie et Restauration', 'Serveur'),
+    'secrétaire': ('Administration', 'Secrétaire'),
+    'juriste': ('Droit et Juridique', 'Juriste'),
+    'architecte': ('Architecture et Urbanisme', 'Architecte'),
+}
+
+# Mot-clé ignoré si l'un de ces mots est autour ("serveur Windows", "centre commercial"…)
+CONTEXTES_EXCLUS = {
+    'serveur': ['windows', 'linux', 'web', 'réseau', 'informatique', 'administrat', 'cloud', 'sql', 'mail', 'dns'],
+    'commercial': ['centre commercial', 'registre du commerce'],
+    'architecte': ['logiciel', 'cloud', 'solution', 'données', 'système', 'réseau'],
+}
+NEGATIONS = ['pas de ', 'non ', 'aucun ']
+_MOTIFS_METIERS = [(re.compile(r'(?<!\w)' + re.escape(mot) + r'(?!\w)'), mot, dom, met)
+                   for mot, (dom, met) in sorted(METIERS_PRIORITAIRES.items(), key=lambda x: -len(x[0]))]
+
+
+def chercher_metier(zone):
+    """Métier connu trouvé en mot entier dans la zone (le mot-clé le plus long gagne)"""
+    for motif, mot, domaine, metier in _MOTIFS_METIERS:
+        for m in motif.finditer(zone):
+            contexte = zone[max(0, m.start() - 30):m.end() + 30]
+            if any(neg in contexte for neg in NEGATIONS + CONTEXTES_EXCLUS.get(mot, [])):
+                continue
+            return domaine, metier
+    return None
+
 
 # ============================================================
 # SCORE
@@ -1379,17 +1322,6 @@ def calculer_score(infos):
 # ============================================================
 # LECTURE CV
 # ============================================================
-def est_cv_image(chemin):
-    try:
-        if not chemin.lower().endswith('.pdf'): return False
-        doc = fitz.open(chemin)
-        texte_total = ""
-        for page in doc: texte_total += page.get_text()
-        doc.close()
-        return len(texte_total.strip()) < 200
-    except: return False
-
-
 def _texte_ocr(resultat):
     """Normalise la sortie de RapidOCR (compatible tuple v1.2/v1.3 et objet v1.4+)."""
     if resultat is None:
@@ -1411,7 +1343,7 @@ def lire_avec_ocr(chemin):
             doc = fitz.open(chemin)
             texte_final = ""
             for page in doc:
-                pix = page.get_pixmap(dpi=100)
+                pix = page.get_pixmap(dpi=200)  # 200 dpi : bien plus lisible pour l'OCR
                 img_bytes = pix.tobytes("png")
                 texte_final += _texte_ocr(reader(img_bytes)) + "\n"
             doc.close()
@@ -1421,8 +1353,19 @@ def lire_avec_ocr(chemin):
     except: return ""
 
 
-@st.cache_data(show_spinner=False)
 def lire_cv(chemin):
+    """Texte du CV. Le cache tient compte de la date et de la taille du fichier :
+    un CV remplacé par un autre portant le même nom est relu."""
+    try:
+        infos_fichier = os.stat(chemin)
+    except OSError:
+        return ""
+    return _lire_cv_cache(chemin, infos_fichier.st_mtime, infos_fichier.st_size)
+
+
+@st.cache_data(show_spinner=False)
+def _lire_cv_cache(chemin, date_modif, taille):
+    # date_modif et taille ne servent qu'à la clé de cache
     texte = ""
     try:
         if chemin.lower().endswith('.pdf'):
@@ -1490,15 +1433,6 @@ def nom_export(prefixe="CVSmart_export"):
     return f"{prefixe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
 
-def exporter_excel(resultats, nom_fichier=None):
-    """Enregistre l'export Excel dans le dossier exports/ et renvoie son chemin"""
-    donnees = excel_octets(resultats)
-    if not donnees: return None
-    chemin = os.path.join(DOSSIER_EXCEL, nom_fichier or nom_export())
-    with open(chemin, 'wb') as f:
-        f.write(donnees)
-    return chemin
-
 # ============================================================
 # MATCHING
 # ============================================================
@@ -1557,19 +1491,32 @@ def charger_ocr():
     except: return None
 
 
+def signature_exemples(exemples):
+    """Empreinte des exemples d'entraînement : sert de clé de cache au modèle"""
+    h = hashlib.sha1()
+    for ex in exemples:
+        h.update(ex.get('domaine', '').encode('utf-8') + b'\0' + ex.get('texte', '').encode('utf-8') + b'\0')
+    return f"{len(exemples)}-{h.hexdigest()}"
+
+
 @st.cache_resource(show_spinner=False)
-def charger_classificateur(_exemples=(), version=0):
-    # _exemples n'est pas haché par Streamlit : la clé de cache est "version"
+def charger_classificateur(_exemples=(), signature=""):
+    # _exemples n'est pas haché par Streamlit : la clé de cache est la signature des exemples,
+    # donc un modèle en cache correspond toujours exactement aux exemples fournis
     classif = Classificateur()
     classif.entrainer(list(_exemples))
     return classif
+
+
+def obtenir_classificateur(app):
+    return charger_classificateur(app['exemples'], signature_exemples(app['exemples']))
 
 
 def reentrainer_classificateur():
     app = st.session_state.apprentissage
     app['stats']['version_modele'] = app['stats'].get('version_modele', 0) + 1
     sauvegarder_apprentissage(app)
-    st.session_state.classif = charger_classificateur(app['exemples'], app['stats']['version_modele'])
+    st.session_state.classif = obtenir_classificateur(app)
 
 # ============================================================
 # SESSION ET NAVIGATION
@@ -1593,7 +1540,7 @@ def init_session():
     if 'classif' not in st.session_state:
         app = st.session_state.apprentissage
         with st.spinner("Initialisation du modèle..."):
-            st.session_state.classif = charger_classificateur(app['exemples'], app['stats'].get('version_modele', 0))
+            st.session_state.classif = obtenir_classificateur(app)
     if 'extract' not in st.session_state:
         st.session_state.extract = ExtracteurInfos()
     if 'config_email' not in st.session_state:
@@ -1620,8 +1567,7 @@ def flash(texte, ton='vert', icone_nom='valide'):
 
 def afficher_menu():
     with st.sidebar:
-        ui.afficher(f'<div class="cv-marque">{ui.LOGO_CIBLE}<div><div class="cv-marque-nom">CIBLE RH</div>'
-                    f'<div class="cv-marque-sous">Emploi</div></div></div>')
+        ui.afficher(f'<div class="cv-marque">{ui.LOGO_MARQUE}</div>')
         for page, cle in PAGES:
             actif = st.session_state.page_active == page
             st.button(page, key=cle, type="primary" if actif else "secondary",
@@ -1666,10 +1612,6 @@ def analyser_cv(chemin, nom, source=None, copie_nom=None, sous_dossier_metier=Fa
         return r
 
     infos = st.session_state.extract.extraire_tout(texte)
-    age_calcule, _ = calculer_age_depuis_annee(texte)
-    if age_calcule != "RAS":
-        infos['age'] = age_calcule
-    infos['sexe'], _ = determiner_sexe_avec_confiance(texte, infos.get('prenom', 'RAS'))
     infos = appliquer_apprentissage(infos, st.session_state.apprentissage)
 
     cat, metier, conf = st.session_state.classif.classifier(texte)
@@ -2247,10 +2189,15 @@ def modale_correction(idx_cv):
             'niveau_etudes': new_niveau, 'etablissement': new_etab, 'annees_experience': new_experience,
             'poste_actuel': new_poste, 'langues': new_langues, 'certifications': new_certs,
         }
+        app = st.session_state.apprentissage
+        modifie = False
         for champ, val in corrections.items():
             if infos.get(champ, 'RAS') != val:
-                enregistrer_correction(st.session_state.apprentissage, champ, infos.get(champ, 'RAS'), val, new_prenom)
+                enregistrer_correction(app, champ, infos.get(champ, 'RAS'), val, new_prenom, sauvegarder=False)
+                modifie = True
             infos[champ] = val
+        if modifie:
+            sauvegarder_apprentissage(app)  # une seule écriture du fichier
         infos['competences'] = [c.strip() for c in new_comps.split(',') if c.strip()]
         r['metier'] = new_metier
         r['scores'] = calculer_score(infos)
@@ -2385,12 +2332,34 @@ def page_correspondance():
 def traiter_email(em, gestionnaire):
     """Analyse les pièces jointes d'un email puis le déplace dans le dossier des emails traités"""
     nb = 0
+    illisibles = []
     for pj in em['pieces_jointes']:
         r = analyser_cv(pj['chemin'], pj['nom_original'], source=em['email_expediteur'],
                         copie_nom=pj['nom_sauvegarde'], sous_dossier_metier=True)
         nb += r['succes']
+        if not r['succes']:
+            illisibles.append(pj['nom_original'])
+    # Un email dont un CV n'a pas pu être lu (ex. ancien format .doc) reste dans la boîte
+    if illisibles:
+        return nb, False, ("CV illisible, email laissé dans la boîte de réception : " + ", ".join(illisibles)
+                           + (" (format .doc non pris en charge : demandez un PDF ou un DOCX)"
+                              if any(n.lower().endswith('.doc') for n in illisibles) else ""))
     ok, msg = gestionnaire.deplacer_email(em['id'])
     return nb, ok, msg
+
+
+def _sans_accents(texte):
+    return ''.join(c for c in unicodedata.normalize('NFD', texte.lower()) if unicodedata.category(c) != 'Mn')
+
+
+def email_correspond(em, recherche):
+    """Vrai si tous les mots recherchés apparaissent dans l'email (sans tenir compte des accents ni des majuscules)"""
+    mots = _sans_accents(recherche).split()
+    if not mots:
+        return True
+    cible = _sans_accents(" ".join([em.get('sujet', ''), em.get('expediteur', ''), em.get('date', '')]
+                                   + [pj['nom_original'] for pj in em.get('pieces_jointes', [])]))
+    return all(mot in cible for mot in mots)
 
 
 def page_emails():
@@ -2419,7 +2388,7 @@ def page_emails():
     if verifier:
         with st.spinner("Connexion à la boîte mail..."):
             g = gestionnaire()
-            emails, msg = g.recuperer_emails_non_lus(max_emails=30)
+            emails, msg = g.recuperer_emails(max_emails=30)
             g.se_deconnecter()
         st.session_state.emails_recuperes = emails
         if not emails:
@@ -2439,7 +2408,20 @@ def page_emails():
         ui.carte_stat("À traiter", len(emails), icone_nom='boite', ton='ambre'),
     ], 3))
 
-    for i, em in enumerate(emails):
+    recherche = st.text_input("Rechercher un email", key="recherche_emails",
+                              placeholder="Rechercher par sujet, expéditeur, date ou nom de fichier...",
+                              label_visibility="collapsed")
+    tous_les_emails = emails
+    emails = [em for em in emails if email_correspond(em, recherche)]
+    if recherche.strip():
+        ui.afficher(f'<div class="cv-muted"><b style="color:{ui.BLEU}">{len(emails)} email{"s" if len(emails) > 1 else ""}</b>'
+                    f' sur {len(tous_les_emails)} pour « {escape(recherche.strip())} »</div>')
+        if not emails:
+            ui.message("Aucun email ne correspond à cette recherche.", 'ambre', 'alerte')
+            return
+
+    for em in emails:
+        i = em['id']  # clé stable : l'ordre affiché change avec la recherche
         with st.container(key=f"carte_email_{i}"):
             t, b = st.columns([4, 1.4])
             with t:
@@ -2455,19 +2437,23 @@ def page_emails():
                         g.se_connecter()
                         nb, ok, msg = traiter_email(em, g)
                         g.se_deconnecter()
-                    st.session_state.emails_recuperes = [e for e in emails if e['id'] != em['id']]
+                    st.session_state.emails_recuperes = [e for e in tous_les_emails if e['id'] != em['id']]
                     if ok:
                         flash(f"{nb} CV analysé{'s' if nb > 1 else ''} · email déplacé dans « {escape(dossier_traites)} ».")
                     else:
                         flash(f"{nb} CV analysé{'s' if nb > 1 else ''}, mais l'email n'a pas pu être déplacé : {escape(msg)}", 'ambre', 'alerte')
                     st.rerun()
                 if st.button("Ignorer", key=f"btn_ignorer_{i}", use_container_width=True):
-                    st.session_state.emails_recuperes = [e for e in emails if e['id'] != em['id']]
+                    st.session_state.emails_recuperes = [e for e in tous_les_emails if e['id'] != em['id']]
                     st.rerun()
 
-    if st.button("Analyser tous les emails", type="primary", key="btn_analyser_tous"):
+    # Avec une recherche active, seuls les emails affichés sont analysés
+    filtre = len(emails) < len(tous_les_emails)
+    libelle = (f"Analyser les {len(emails)} emails affichés" if filtre and len(emails) > 1
+               else "Analyser l'email affiché" if filtre else "Analyser tous les emails")
+    if st.button(libelle, type="primary", key="btn_analyser_tous"):
         total, echecs = 0, 0
-        with st.spinner("Analyse de tous les CV reçus..."):
+        with st.spinner("Analyse des CV reçus..."):
             g = gestionnaire()
             g.se_connecter()
             for em in emails:
@@ -2475,7 +2461,8 @@ def page_emails():
                 total += nb
                 echecs += not ok
             g.se_deconnecter()
-        st.session_state.emails_recuperes = []
+        traites = {em['id'] for em in emails}
+        st.session_state.emails_recuperes = [e for e in tous_les_emails if e['id'] not in traites]
         flash(f"{total} CV analysés et classés."
               + (f" {echecs} email(s) n'ont pas pu être déplacés." if echecs else ""), 'ambre' if echecs else 'vert')
         st.rerun()
@@ -2494,7 +2481,10 @@ def vider_session():
 
 
 def reinitialiser_apprentissage():
+    version = st.session_state.apprentissage['stats'].get('version_modele', 0)
     st.session_state.apprentissage = apprentissage_vide()
+    # Le numéro de version continue (il ne repart pas à zéro)
+    st.session_state.apprentissage['stats']['version_modele'] = version
     sauvegarder_apprentissage(st.session_state.apprentissage)
     reentrainer_classificateur()
     st.session_state.confirmer_reinit = False

@@ -9,7 +9,6 @@ import base64
 import imaplib
 import email
 from email.header import decode_header
-from datetime import datetime
 from pathlib import Path
 
 # Dossier local où on télécharge les CV
@@ -123,8 +122,13 @@ class GestionnaireEmail:
         nom = nom.strip()
         return nom[:200]
     
-    def recuperer_emails_non_lus(self, max_emails=50):
-        """Récupère les emails non lus avec pièces jointes CV"""
+    def recuperer_emails(self, max_emails=50):
+        """Récupère les emails de la boîte de réception qui ont des CV en pièce jointe.
+
+        Tous les emails sont lus (pas seulement les non lus) : les emails traités sont
+        déplacés hors de la boîte, donc ceux qui restent sont à traiter. Les messages
+        ne sont pas marqués comme lus et une pièce jointe déjà téléchargée n'est pas
+        téléchargée une seconde fois."""
         if not self.connexion:
             ok, msg = self.se_connecter()
             if not ok:
@@ -135,7 +139,7 @@ class GestionnaireEmail:
         try:
             self.connexion.select("INBOX")
             # UID (stable) plutôt que numéro de séquence (change après chaque déplacement)
-            status, messages = self.connexion.uid("search", None, "ALL")
+            status, messages = self.connexion.uid("search", None, "UNDELETED")
             
             if status != "OK":
                 return [], "Impossible de lire la boîte"
@@ -145,49 +149,54 @@ class GestionnaireEmail:
             
             for email_id in ids_emails:
                 try:
-                    status, data = self.connexion.uid("fetch", email_id, "(RFC822)")
+                    # BODY.PEEK[] : ne marque pas l'email comme lu
+                    status, data = self.connexion.uid("fetch", email_id, "(BODY.PEEK[])")
                     if status != "OK" or not data or not isinstance(data[0], tuple):
                         continue
-                    
+
                     message = email.message_from_bytes(data[0][1])
-                    
+
                     expediteur = self._decoder_expediteur(message.get("From", ""))
                     email_exp = self._extraire_email_expediteur(expediteur)
                     sujet = self._decoder_sujet(message.get("Subject", ""))
                     date = message.get("Date", "")
-                    
+                    uid = email_id.decode() if isinstance(email_id, bytes) else str(email_id)
+
                     pieces_jointes = []
-                    
-                    for partie in message.walk():
-                        if partie.get_content_disposition() == "attachment":
-                            nom_fichier = partie.get_filename()
-                            if not nom_fichier:
-                                continue
-                            
-                            nom_decoded = self._decoder_sujet(nom_fichier)
-                            nom_decoded = self._nettoyer_nom_fichier(nom_decoded)
-                            
-                            ext = os.path.splitext(nom_decoded)[1].lower()
-                            if ext in ['.pdf', '.docx', '.doc']:
-                                contenu = partie.get_payload(decode=True)
-                                if contenu:
-                                    horodatage = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                    nom_sauvegarde = f"{horodatage}_{nom_decoded}"
-                                    chemin_sauvegarde = os.path.join(self.dossier_local, nom_sauvegarde)
-                                    
+
+                    for numero, partie in enumerate(message.walk()):
+                        # Certains clients envoient les PJ en "inline" : on se fie au nom de fichier
+                        if partie.get_content_maintype() == "multipart":
+                            continue
+                        nom_fichier = partie.get_filename()
+                        if not nom_fichier:
+                            continue
+
+                        nom_decoded = self._decoder_sujet(nom_fichier)
+                        nom_decoded = self._nettoyer_nom_fichier(nom_decoded)
+
+                        ext = os.path.splitext(nom_decoded)[1].lower()
+                        if ext in ['.pdf', '.docx', '.doc']:
+                            contenu = partie.get_payload(decode=True)
+                            if contenu:
+                                # Nom stable (UID + n° de partie) : pas de doublon ni d'écrasement
+                                nom_sauvegarde = f"{uid}_{numero}_{nom_decoded}"
+                                chemin_sauvegarde = os.path.join(self.dossier_local, nom_sauvegarde)
+
+                                if not os.path.exists(chemin_sauvegarde):
                                     with open(chemin_sauvegarde, 'wb') as f:
                                         f.write(contenu)
-                                    
-                                    pieces_jointes.append({
-                                        'nom_original': nom_decoded,
-                                        'nom_sauvegarde': nom_sauvegarde,
-                                        'chemin': chemin_sauvegarde,
-                                        'taille': len(contenu)
-                                    })
+
+                                pieces_jointes.append({
+                                    'nom_original': nom_decoded,
+                                    'nom_sauvegarde': nom_sauvegarde,
+                                    'chemin': chemin_sauvegarde,
+                                    'taille': len(contenu)
+                                })
                     
                     if pieces_jointes:
                         emails_trouves.append({
-                            'id': email_id.decode() if isinstance(email_id, bytes) else str(email_id),
+                            'id': uid,
                             'expediteur': expediteur,
                             'email_expediteur': email_exp,
                             'sujet': sujet,
@@ -223,49 +232,27 @@ class GestionnaireEmail:
             except:
                 pass
             
+            capacites = getattr(self.connexion, 'capabilities', ())
+            # MOVE (RFC 6851) : déplacement atomique de ce seul email
+            if 'MOVE' in capacites:
+                status, _ = self.connexion.uid("move", email_id, dossier_imap)
+                if status == "OK":
+                    return True, f"Email déplacé dans '{dossier_destination}'"
+
             status, _ = self.connexion.uid("copy", email_id, dossier_imap)
             if status != "OK":
                 return False, f"Copie impossible vers '{dossier_destination}'"
             self.connexion.uid("store", email_id, '+FLAGS', '(\\Deleted)')
-            self.connexion.expunge()
-            
-            return True, f"Email déplacé dans '{dossier_destination}'"
+            if 'UIDPLUS' in capacites:
+                # Supprime uniquement cet email (un EXPUNGE simple effacerait aussi
+                # les autres emails déjà marqués comme supprimés dans la boîte)
+                self.connexion.uid("expunge", email_id)
+                return True, f"Email déplacé dans '{dossier_destination}'"
+            # Serveur trop ancien : l'email est copié et marqué supprimé, sans purge globale
+            return True, (f"Email copié dans '{dossier_destination}' et marqué comme supprimé "
+                          f"dans la boîte de réception")
         except Exception as e:
             return False, f"Erreur : {str(e)}"
-    
-    def compter_emails_non_lus(self):
-        """Compte les emails non lus"""
-        try:
-            if not self.connexion:
-                ok, _ = self.se_connecter()
-                if not ok:
-                    return 0
-            
-            self.connexion.select("INBOX")
-            status, messages = self.connexion.search(None, "ALL")
-            if status == "OK":
-                return len(messages[0].split())
-            return 0
-        except:
-            return 0
-    
-    def compter_emails_traites(self):
-        """Compte les emails dans le dossier 'traités'"""
-        try:
-            if not self.connexion:
-                ok, _ = self.se_connecter()
-                if not ok:
-                    return 0
-            
-            try:
-                status, messages = self.connexion.select(encoder_nom_dossier_imap(self.dossier_traites), readonly=True)
-                if status == "OK":
-                    return int(messages[0])
-                return 0
-            except:
-                return 0
-        except:
-            return 0
 
 
 def tester_connexion(serveur, port, email_address, mot_de_passe):
@@ -277,15 +264,3 @@ def tester_connexion(serveur, port, email_address, mot_de_passe):
         return ok, msg
     except Exception as e:
         return False, f"Erreur : {str(e)}"
-
-
-def nettoyer_dossier_email():
-    """Vide le dossier local des CV téléchargés"""
-    try:
-        for fichier in os.listdir(DOSSIER_CV_EMAIL):
-            chemin = os.path.join(DOSSIER_CV_EMAIL, fichier)
-            if os.path.isfile(chemin):
-                os.remove(chemin)
-        return True, "Dossier nettoyé"
-    except Exception as e:
-        return False, str(e)
