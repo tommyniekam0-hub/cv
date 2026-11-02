@@ -66,6 +66,9 @@ ICONES = {
     'erreur': '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
     'boite': '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
     'trombone': '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+    'utilisateurs': '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    'compte': '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    'deconnexion': '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
 }
 
 
@@ -210,6 +213,7 @@ ICONES_BOUTONS = {
     'nav_resultats': 'fichier', 'nav_filtrer': 'filtre', 'nav_validation': 'valide',
     'nav_apprentissage': 'apprentissage', 'nav_correspondance': 'correspondance',
     'nav_parametres': 'parametres', 'btn_accueil_dossier': 'dossier',
+    'nav_utilisateurs': 'utilisateurs', 'nav_compte': 'compte', 'nav_deconnexion': 'deconnexion',
 }
 
 CSS = f"""
@@ -238,7 +242,11 @@ html, body, .stApp *:not([data-testid="stIconMaterial"]) {{
 .cv-marque-nom {{ font-weight: 800; font-size: 1.05rem; line-height: 1.1; }}
 .cv-marque-logo {{ background: #fff; border-radius: 12px; padding: 0.6rem 0.8rem; }}
 .cv-marque-logo img {{ display: block; width: 100%; height: auto; }}
-.cv-pied {{ position: fixed; bottom: 1.4rem; left: 1.3rem; color: rgba(255,255,255,0.85); font-size: 0.78rem; line-height: 1.5; }}
+.cv-pied {{ padding: 1rem 0.8rem 0 0.8rem; color: rgba(255,255,255,0.7); font-size: 0.78rem; line-height: 1.5; }}
+.cv-utilisateur {{ margin: 0.9rem 0.5rem 0 0.5rem; padding: 0.9rem 0.3rem 0.2rem 0.3rem; border-top: 1px solid rgba(255,255,255,0.18);
+    color: rgba(255,255,255,0.75); font-size: 0.82rem; }}
+.cv-utilisateur-nom {{ color: #fff; font-weight: 700; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.st-key-nav_deconnexion button p {{ font-size: 0.9rem !important; opacity: 0.9; }}
 [class*="st-key-nav_"] button {{
     width: 100% !important; background: transparent !important; border: none !important; color: #fff !important;
     justify-content: flex-start !important; gap: 0.8rem; padding: 0.55rem 0.8rem !important;

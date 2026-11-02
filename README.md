@@ -71,6 +71,24 @@ streamlit run app.py
 
 Streamlit opens <http://localhost:8501> in your browser. On first launch the classifier is trained (a few seconds) and, if installed, the RapidOCR model is loaded (once).
 
+### Accounts and permissions
+
+The app opens on a login page.
+
+- **First launch**: no account exists yet, so the login page asks you to create the **administrator** account.
+- **Admins** have every right, plus two admin-only pages: **Paramètres** (mailbox credentials, learning reset) and **Utilisateurs** (create, edit, deactivate, delete accounts, reset passwords).
+- **Users** only see what an admin granted them: Analyser, choosing another folder (server file access), Emails, Résultats, Filtrer, Validation, Apprentissage, Correspondance, Export. New accounts get a temporary password that must be changed at first login.
+- Changes made by an admin (rights, deactivation) apply immediately, even to users who are already logged in. A session is closed after 30 minutes of inactivity; reloading the page also asks you to log in again.
+- After 5 failed logins, an identifier is blocked for 5 minutes.
+
+Accounts are stored in `utilisateurs.json` (git-ignored) with PBKDF2-SHA256 salted password hashes. If no admin can log in any more:
+
+```bash
+python auth.py admin <identifier>   # creates the admin, or resets its password
+```
+
+> When the app is reachable from other computers, serve it over **HTTPS** (reverse proxy such as Nginx or Caddy): otherwise passwords travel unencrypted over the network.
+
 ### Analyse your first CVs
 
 1. Put your CVs (`.pdf` / `.docx`) in the `cv_a_traiter/` folder (created automatically on first launch), or type any other folder path on the **Analyser** page.
@@ -95,6 +113,7 @@ All created next to `app.py` and git-ignored:
 
 ```
 app.py                       Main Streamlit application — run this
+auth.py                      User accounts: login, roles (admin / user), permissions, password hashing
 ui.py                        Design system: colours, Lucide icons, CSS, HTML components
 .streamlit/config.toml       Streamlit theme (light mode, brand colours)
 gestionnaire_email.py        IMAP client: fetch CV attachments, move processed emails

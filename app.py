@@ -7,6 +7,7 @@ import io
 import os
 import re
 import json
+import time
 import shutil
 import hashlib
 import unicodedata
@@ -29,6 +30,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 from gestionnaire_email import GestionnaireEmail, tester_connexion
+import auth
 import ui
 from html import escape
 
@@ -1531,7 +1533,80 @@ PAGES = [
     ("Apprentissage", "nav_apprentissage"),
     ("Correspondance", "nav_correspondance"),
     ("Paramètres", "nav_parametres"),
+    ("Utilisateurs", "nav_utilisateurs"),
+    ("Mon compte", "nav_compte"),
 ]
+
+# ============================================================
+# COMPTES ET DROITS D'ACCÈS
+# ============================================================
+DUREE_INACTIVITE = 30 * 60  # secondes sans action avant déconnexion automatique
+PAGES_POUR_TOUS = {"Accueil", "Mon compte"}
+PAGES_ADMIN = {"Paramètres", "Utilisateurs"}  # identifiants IMAP, comptes : admin seulement
+PERMISSION_PAGE = {
+    "Analyser": 'analyser', "Emails": 'emails', "Résultats": 'resultats', "Filtrer": 'filtrer',
+    "Validation": 'validation', "Apprentissage": 'apprentissage', "Correspondance": 'correspondance',
+}
+LIBELLES_COURTS = {
+    'analyser': "Analyser", 'dossier': "Dossiers", 'emails': "Emails", 'resultats': "Résultats",
+    'filtrer': "Filtrer", 'validation': "Validation", 'apprentissage': "Apprentissage",
+    'correspondance': "Correspondance", 'exporter': "Export",
+}
+
+
+def utilisateur_courant():
+    return st.session_state.get('utilisateur')
+
+
+def est_admin():
+    u = utilisateur_courant()
+    return bool(u) and u['role'] == auth.ROLE_ADMIN
+
+
+def peut(permission):
+    return auth.a_permission(utilisateur_courant(), permission)
+
+
+def peut_page(page):
+    if page in PAGES_POUR_TOUS:
+        return utilisateur_courant() is not None
+    if page in PAGES_ADMIN:
+        return est_admin()
+    return peut(PERMISSION_PAGE.get(page, ''))
+
+
+def ouvrir_session(utilisateur):
+    # On repart d'une session vide : rien ne reste d'un compte précédent dans ce navigateur
+    st.session_state.clear()
+    st.session_state.identifiant = utilisateur['identifiant']
+    st.session_state.utilisateur = utilisateur
+    st.session_state.derniere_activite = time.time()
+
+
+def deconnecter(message=None):
+    """Efface toute la session (résultats d'analyse compris : ce sont des données personnelles)"""
+    st.session_state.clear()
+    if message:
+        st.session_state.message_connexion = message
+
+
+def verifier_session():
+    """Vrai si un utilisateur est connecté. Le compte est relu à chaque affichage :
+    une désactivation ou un changement de droits par un admin s'applique immédiatement."""
+    ident = st.session_state.get('identifiant')
+    if not ident:
+        return False
+    maintenant = time.time()
+    if maintenant - st.session_state.get('derniere_activite', 0) > DUREE_INACTIVITE:
+        deconnecter("Session expirée après 30 minutes d'inactivité. Reconnectez-vous.")
+        return False
+    utilisateur = auth.obtenir(ident)
+    if not utilisateur or not utilisateur.get('actif', True):
+        deconnecter("Votre compte a été désactivé ou supprimé.")
+        return False
+    st.session_state.utilisateur = utilisateur
+    st.session_state.derniere_activite = maintenant
+    return True
 
 
 def init_session():
@@ -1557,7 +1632,8 @@ def init_session():
 
 
 def aller_a(page):
-    st.session_state.page_active = page
+    if peut_page(page):
+        st.session_state.page_active = page
 
 
 def flash(texte, ton='vert', icone_nom='valide'):
@@ -1569,9 +1645,15 @@ def afficher_menu():
     with st.sidebar:
         ui.afficher(f'<div class="cv-marque">{ui.LOGO_MARQUE}</div>')
         for page, cle in PAGES:
+            if not peut_page(page):
+                continue
             actif = st.session_state.page_active == page
             st.button(page, key=cle, type="primary" if actif else "secondary",
                       use_container_width=True, on_click=aller_a, args=(page,))
+        u = utilisateur_courant()
+        ui.afficher(f'<div class="cv-utilisateur"><div class="cv-utilisateur-nom">{escape(u["nom"])}</div>'
+                    f'<div>{escape(auth.ROLES[u["role"]])}</div></div>')
+        st.button("Se déconnecter", key="nav_deconnexion", use_container_width=True, on_click=deconnecter)
         ui.afficher(f'<div class="cv-pied">CVSmart v{VERSION_APP}<br>CIBLE RH Emploi</div>')
 
 # ============================================================
@@ -1659,6 +1741,8 @@ def changer_domaine(r, domaine):
 
 def bouton_export(libelle, resultats, cle, prefixe="CVSmart_export"):
     """Bouton de téléchargement Excel (une copie est aussi enregistrée dans exports/)"""
+    if not peut('exporter'):
+        return
     donnees = excel_octets(resultats)
     nom = nom_export(prefixe)
 
@@ -1674,16 +1758,17 @@ def bouton_export(libelle, resultats, cle, prefixe="CVSmart_export"):
 
 def etat_vide(texte, libelle_bouton=None, page=None):
     ui.message(texte, 'bleu', 'boite')
-    if libelle_bouton:
+    if libelle_bouton and peut_page(page):
         st.button(libelle_bouton, key=f"vide_{page}", type="primary", on_click=aller_a, args=(page,))
 
 # ============================================================
 # PAGE ACCUEIL
 # ============================================================
 def ouvrir_selection_dossier():
-    st.session_state.page_active = "Analyser"
-    st.session_state.edition_dossier = True
-    st.session_state.saisie_dossier = st.session_state.chemin_dossier
+    aller_a("Analyser")
+    if peut('dossier'):
+        st.session_state.edition_dossier = True
+        st.session_state.saisie_dossier = st.session_state.chemin_dossier
 
 
 def page_accueil():
@@ -1696,11 +1781,13 @@ def page_accueil():
             <div class="cv-hero-accroche">L'intelligence qui trie vos talents</div>
             <div class="cv-hero-texte">Classez automatiquement vos CV par domaine professionnel en quelques clics.</div>
         </div>''')
-        _, b, _ = st.columns([1, 2, 1])
-        with b:
-            st.button("Sélectionner un dossier de CV", key="btn_accueil_dossier", type="primary",
-                      use_container_width=True, on_click=ouvrir_selection_dossier)
-        ui.afficher('<div class="cv-muted" style="text-align:center;margin-top:-0.4rem">Formats acceptés : PDF, DOCX, DOC</div>')
+        if peut_page("Analyser"):
+            _, b, _ = st.columns([1, 2, 1])
+            with b:
+                st.button("Sélectionner un dossier de CV" if peut('dossier') else "Analyser les CV",
+                          key="btn_accueil_dossier", type="primary",
+                          use_container_width=True, on_click=ouvrir_selection_dossier)
+            ui.afficher('<div class="cv-muted" style="text-align:center;margin-top:-0.4rem">Formats acceptés : PDF, DOCX, DOC</div>')
 
         atouts = [('eclair', 'Rapide', 'Analyse en quelques secondes', R),
                   ('cible', 'Précis', 'Classification par domaine', B),
@@ -1709,11 +1796,14 @@ def page_accueil():
             f'<div>{ui.icone(ic, 24, coul)}<div class="cv-atout-titre" style="color:{coul}">{t}</div>'
             f'<div class="cv-muted">{d}</div></div>' for ic, t, d, coul in atouts) + '</div>')
 
-        ui.afficher('<div class="cv-label" style="margin:1.3rem 0 -0.3rem 0">Nouveaux outils</div>')
-        outils = [("Filtrer", "Affiner par domaine, expérience, compétences"),
-                  ("Validation", "Confirmer ou corriger les classements"),
-                  ("Apprentissage", "Améliorer le tri grâce à vos corrections"),
-                  ("Correspondance", "Comparer les CV à une offre d'emploi")]
+        outils = [(page, texte) for page, texte in [
+                      ("Filtrer", "Affiner par domaine, expérience, compétences"),
+                      ("Validation", "Confirmer ou corriger les classements"),
+                      ("Apprentissage", "Améliorer le tri grâce à vos corrections"),
+                      ("Correspondance", "Comparer les CV à une offre d'emploi")]
+                  if peut_page(page)]
+        if outils:
+            ui.afficher('<div class="cv-label" style="margin:1.3rem 0 -0.3rem 0">Nouveaux outils</div>')
         for col, (page, texte) in zip(st.columns(4), outils):
             with col, st.container(key=f"clic_outil_{page.lower()}"):
                 ui.afficher(f'<div class="cv-outil"><div class="cv-outil-titre">{page}</div>'
@@ -1724,6 +1814,8 @@ def page_accueil():
 # PAGE ANALYSER
 # ============================================================
 def basculer_edition_dossier():
+    if not peut('dossier'):
+        return
     if st.session_state.edition_dossier:
         saisie = st.session_state.get('saisie_dossier', '').strip()
         if saisie:
@@ -1759,6 +1851,10 @@ def rendu_progression(total, termines, journal, en_cours=False):
 
 def page_analyser():
     ui.entete("Analyse et classement des CV")
+    if not peut('dossier'):
+        # Sans cette permission, seul le dossier par défaut peut être analysé
+        st.session_state.chemin_dossier = os.path.abspath(DOSSIER_A_TRAITER)
+        st.session_state.edition_dossier = False
     chemin_dossier = st.session_state.chemin_dossier
 
     with st.container(key="carte_dossier"):
@@ -1771,8 +1867,9 @@ def page_analyser():
                             f'<div style="font-family:ui-monospace,Menlo,monospace;color:#3A4357;word-break:break-all">'
                             f'{escape(chemin_dossier)}</div>')
         with c2:
-            st.button("Valider" if st.session_state.edition_dossier else "Changer", key="btn_changer",
-                      use_container_width=True, on_click=basculer_edition_dossier)
+            if peut('dossier'):
+                st.button("Valider" if st.session_state.edition_dossier else "Changer", key="btn_changer",
+                          use_container_width=True, on_click=basculer_edition_dossier)
         with c3:
             lancer = st.button("Lancer l'analyse", type="primary", key="btn_lancer", use_container_width=True,
                                disabled=st.session_state.edition_dossier)
@@ -1819,7 +1916,9 @@ def page_resultats():
     resultats = st.session_state.resultats
     c1, c2, c3 = st.columns([4.2, 1, 1.9], vertical_alignment="center")
     with c1: ui.entete("Résultats de classification")
-    with c2: st.button("Filtrer", key="btn_res_filtrer", use_container_width=True, on_click=aller_a, args=("Filtrer",))
+    with c2:
+        if peut_page("Filtrer"):
+            st.button("Filtrer", key="btn_res_filtrer", use_container_width=True, on_click=aller_a, args=("Filtrer",))
     with c3: bouton_export("Exporter les résultats", resultats, "btn_res_export")
 
     if not resultats:
@@ -1849,7 +1948,7 @@ def page_resultats():
     ui.afficher('<div class="cv-h2" style="margin-top:0.6rem">Répartition par domaine</div>' + ui.grille(tuiles, 4))
 
     nb = len(st.session_state.cv_a_valider)
-    if nb:
+    if nb and peut_page("Validation"):
         with st.container(key="carte_attention"):
             t, b = st.columns([5, 1.5], vertical_alignment="center")
             with t:
@@ -1874,6 +1973,8 @@ def reinitialiser_filtres():
 
 
 def enregistrer_selection(selection, etiquettes):
+    if not peut('exporter'):
+        return
     nom = "_".join(etiquettes or ["Selection"])
     nom = re.sub(r'[^\w\-]+', '_', nom)[:80] + f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     dossier = os.path.join(DOSSIER_FILTRES, nom)
@@ -1970,9 +2071,10 @@ def page_filtrer():
 
         _, b1, b2 = st.columns([1, 1.3, 1.4])
         with b1:
-            st.button("Enregistrer ce filtre", key="btn_enregistrer_filtre", use_container_width=True,
-                      disabled=not selection, on_click=enregistrer_selection, args=(selection, domaines),
-                      help="Copie les CV de la sélection dans un dossier de CV_filtres")
+            if peut('exporter'):
+                st.button("Enregistrer ce filtre", key="btn_enregistrer_filtre", use_container_width=True,
+                          disabled=not selection, on_click=enregistrer_selection, args=(selection, domaines),
+                          help="Copie les CV de la sélection dans un dossier de CV_filtres")
         with b2:
             bouton_export("Exporter la sélection", selection, "btn_export_selection", "Selection")
 
@@ -2111,8 +2213,9 @@ def page_validation():
             st.checkbox("Apprendre de cette décision", key=f"val_apprendre_{sel}",
                         value=st.session_state.apprentissage['options'].get('auto', True))
         with a2:
-            st.button("(voir l'apprentissage)", key="btn_voir_apprentissage", type="tertiary",
-                      on_click=aller_a, args=("Apprentissage",))
+            if peut_page("Apprentissage"):
+                st.button("(voir l'apprentissage)", key="btn_voir_apprentissage", type="tertiary",
+                          on_click=aller_a, args=("Apprentissage",))
 
         ui.afficher('<div style="height:2.5rem"></div>')
         _, b1, b2 = st.columns([0.5, 1.2, 1.2], vertical_alignment="center")
@@ -2563,19 +2666,266 @@ def page_parametres():
                 f'à partir de vos corrections.</div></div>')
 
 # ============================================================
+# PAGES DE CONNEXION
+# ============================================================
+def entete_connexion():
+    B, R = ui.BLEU, ui.ROUGE
+    ui.afficher(f'''<div class="cv-hero" style="padding-top:2.5rem">
+        <div class="cv-hero-logo">{ui.LOGO_CVSMART}<div class="cv-hero-nom" style="font-size:2.8rem"><span style="color:{B}">CV</span><span style="color:{R}">Smart</span></div></div>
+        <div class="cv-hero-accroche" style="margin-bottom:1.4rem">L'intelligence qui trie vos talents</div>
+    </div>''')
+
+
+def page_connexion():
+    premier_lancement = auth.aucun_utilisateur()
+    _, centre, _ = st.columns([1, 1.5, 1])
+    with centre:
+        entete_connexion()
+        message = st.session_state.pop('message_connexion', None)
+        if message:
+            ui.message(escape(message), 'ambre', 'alerte')
+        with st.container(key="carte_connexion"):
+            if premier_lancement:
+                formulaire_premier_admin()
+            else:
+                formulaire_connexion()
+
+
+def formulaire_connexion():
+    with st.form("form_connexion", border=False):
+        ui.afficher('<div class="cv-h2">Connexion</div>')
+        identifiant = st.text_input("Identifiant", autocomplete="username")
+        mdp = st.text_input("Mot de passe", type="password", autocomplete="current-password")
+        envoyer = st.form_submit_button("Se connecter", type="primary", use_container_width=True)
+    if envoyer:
+        utilisateur, erreur = auth.authentifier(identifiant, mdp)
+        if erreur:
+            ui.message(escape(erreur), 'rose', 'erreur')
+            return
+        ouvrir_session(utilisateur)
+        st.rerun()
+
+
+def formulaire_premier_admin():
+    """Premier lancement : aucun compte n'existe, on crée l'administrateur"""
+    with st.form("form_premier_admin", border=False):
+        ui.afficher('<div class="cv-h2">Créer le compte administrateur</div>'
+                    '<div class="cv-muted" style="margin-bottom:0.6rem">Premier lancement : ce compte pourra '
+                    'ensuite créer les autres utilisateurs.</div>')
+        nom = st.text_input("Nom complet")
+        identifiant = st.text_input("Identifiant", autocomplete="username",
+                                    help="3 à 32 caractères : lettres minuscules, chiffres, point, tiret")
+        mdp = st.text_input("Mot de passe", type="password", autocomplete="new-password",
+                            help=f"Au moins {auth.MDP_LONGUEUR_MIN} caractères, avec lettres et chiffres")
+        confirmation = st.text_input("Confirmez le mot de passe", type="password", autocomplete="new-password")
+        envoyer = st.form_submit_button("Créer le compte", type="primary", use_container_width=True)
+    if not envoyer:
+        return
+    if mdp != confirmation:
+        ui.message("Les deux mots de passe ne correspondent pas.", 'rose', 'erreur')
+        return
+    if not auth.aucun_utilisateur():  # un autre navigateur a été plus rapide
+        st.rerun()
+    ok, msg = auth.creer_utilisateur(identifiant, nom, mdp, role=auth.ROLE_ADMIN, doit_changer_mdp=False)
+    if not ok:
+        ui.message(escape(msg), 'rose', 'erreur')
+        return
+    ouvrir_session(auth.obtenir(identifiant))
+    st.rerun()
+
+
+def formulaire_mot_de_passe(cle):
+    """Formulaire de changement de son propre mot de passe. Vrai si le mot de passe a été changé."""
+    with st.form(cle, border=False, clear_on_submit=True):
+        actuel = st.text_input("Mot de passe actuel", type="password", autocomplete="current-password")
+        nouveau = st.text_input("Nouveau mot de passe", type="password", autocomplete="new-password",
+                                help=f"Au moins {auth.MDP_LONGUEUR_MIN} caractères, avec lettres et chiffres")
+        confirmation = st.text_input("Confirmez le nouveau mot de passe", type="password", autocomplete="new-password")
+        envoyer = st.form_submit_button("Changer le mot de passe", type="primary", use_container_width=True)
+    if not envoyer:
+        return False
+    if nouveau != confirmation:
+        ui.message("Les deux nouveaux mots de passe ne correspondent pas.", 'rose', 'erreur')
+        return False
+    ok, msg = auth.changer_son_mot_de_passe(utilisateur_courant()['identifiant'], actuel, nouveau)
+    if not ok:
+        ui.message(escape(msg), 'rose', 'erreur')
+    return ok
+
+
+def page_changement_obligatoire():
+    """Compte créé ou réinitialisé par un admin : le mot de passe temporaire doit être remplacé"""
+    _, centre, _ = st.columns([1, 1.5, 1])
+    with centre:
+        entete_connexion()
+        with st.container(key="carte_connexion"):
+            ui.afficher('<div class="cv-h2">Choisissez votre mot de passe</div>'
+                        '<div class="cv-muted" style="margin-bottom:0.6rem">Vous utilisez un mot de passe temporaire '
+                        'donné par un administrateur. Remplacez-le par un mot de passe personnel.</div>')
+            if formulaire_mot_de_passe("form_mdp_obligatoire"):
+                flash("Mot de passe enregistré. Bienvenue !")
+                st.rerun()
+        st.button("Se déconnecter", key="btn_deconnexion_mdp", type="tertiary", on_click=deconnecter)
+
+# ============================================================
+# PAGE MON COMPTE
+# ============================================================
+def pastilles_droits(utilisateur):
+    if utilisateur['role'] == auth.ROLE_ADMIN:
+        return ui.pastille("Tous les droits", 'rose')
+    droits = [ui.pastille(LIBELLES_COURTS[p], 'bleu') for p in auth.PERMISSIONS if p in utilisateur.get('permissions', [])]
+    return ' '.join(droits) or '<span class="cv-muted">Aucun droit</span>'
+
+
+def page_mon_compte():
+    u = utilisateur_courant()
+    ui.entete("Mon compte")
+    gauche, droite = st.columns([1, 1], gap="medium")
+    with gauche:
+        connexion = (datetime.fromisoformat(u['derniere_connexion']).strftime("%d/%m/%Y à %H:%M")
+                     if u.get('derniere_connexion') else "—")
+        ui.afficher(f'<div class="cv-carte"><div class="cv-h2">{escape(u["nom"])}</div>'
+                    f'<div class="cv-muted">Identifiant : <b>{escape(u["identifiant"])}</b></div>'
+                    f'<div class="cv-muted">Rôle : <b>{escape(auth.ROLES[u["role"]])}</b></div>'
+                    f'<div class="cv-muted">Connexion : {connexion}</div>'
+                    f'<div class="cv-h3" style="margin-top:1rem">Vos droits</div>'
+                    f'<div style="display:flex;flex-wrap:wrap;gap:0.4rem">{pastilles_droits(u)}</div></div>')
+    with droite, st.container(key="carte_mot_de_passe"):
+        ui.afficher('<div class="cv-h2">Changer de mot de passe</div>')
+        if formulaire_mot_de_passe("form_mdp_compte"):
+            flash("Mot de passe modifié.")
+            st.rerun()
+
+# ============================================================
+# PAGE UTILISATEURS (ADMIN)
+# ============================================================
+def afficher_mdp_temporaire():
+    """Le mot de passe temporaire n'est affiché qu'une fois, juste après sa création"""
+    temporaire = st.session_state.pop('mdp_temporaire', None)
+    if temporaire:
+        ident, mdp = temporaire
+        ui.message(f"Mot de passe temporaire de <b>{escape(ident)}</b> : <code style=\"font-size:1rem\">{escape(mdp)}</code> "
+                   f"— notez-le et transmettez-le à l'utilisateur. Il ne sera plus affiché, et l'utilisateur "
+                   f"devra le changer à sa première connexion.", 'ambre', 'alerte')
+
+
+def cases_permissions(prefixe, cochees):
+    return [p for p, libelle in auth.PERMISSIONS.items()
+            if st.checkbox(libelle, value=p in cochees, key=f"{prefixe}_{p}")]
+
+
+def page_utilisateurs():
+    ui.entete("Utilisateurs", "Créez les comptes et choisissez ce que chaque utilisateur peut faire.")
+    afficher_mdp_temporaire()
+    utilisateurs = auth.charger_utilisateurs()
+    moi = utilisateur_courant()['identifiant']
+
+    lignes = ''
+    for ident, u in sorted(utilisateurs.items(), key=lambda x: (x[1]['role'] != auth.ROLE_ADMIN, x[0])):
+        statut = ui.pastille("Actif", 'vert') if u.get('actif', True) else ui.pastille("Désactivé", 'gris')
+        connexion = (datetime.fromisoformat(u['derniere_connexion']).strftime("%d/%m/%Y %H:%M")
+                     if u.get('derniere_connexion') else "Jamais")
+        lignes += (f'<tr><td><div class="cv-nom">{escape(u["nom"])}{" (vous)" if ident == moi else ""}</div>'
+                   f'<div class="cv-fichier">{escape(ident)}</div></td>'
+                   f'<td>{escape(auth.ROLES[u["role"]])}</td><td>{statut}</td>'
+                   f'<td><div style="display:flex;flex-wrap:wrap;gap:0.3rem">{pastilles_droits(u)}</div></td>'
+                   f'<td class="cv-muted">{connexion}</td></tr>')
+    ui.afficher(f'<table class="cv-table"><thead><tr><th>Utilisateur</th><th>Rôle</th><th>Statut</th>'
+                f'<th>Droits</th><th>Dernière connexion</th></tr></thead><tbody>{lignes}</tbody></table>')
+
+    gauche, droite = st.columns(2, gap="medium")
+    with gauche, st.container(key="carte_modifier_utilisateur"):
+        ui.afficher('<div class="cv-h2">Modifier un compte</div>')
+        ident = st.selectbox("Compte", list(utilisateurs), key="mu_sel",
+                             format_func=lambda i: f"{utilisateurs[i]['nom']} ({i})")
+        u = utilisateurs[ident]
+        soi_meme = ident == moi
+        with st.form(f"form_mu_{ident}", border=False):
+            nom = st.text_input("Nom complet", value=u['nom'], key=f"mu_nom_{ident}")
+            roles = list(auth.ROLES)
+            role = st.radio("Rôle", roles, index=roles.index(u['role']), format_func=auth.ROLES.get,
+                            horizontal=True, key=f"mu_role_{ident}", disabled=soi_meme,
+                            help="Vous ne pouvez pas retirer votre propre rôle d'administrateur." if soi_meme else None)
+            actif = st.checkbox("Compte actif", value=u.get('actif', True), key=f"mu_actif_{ident}", disabled=soi_meme)
+            ui.afficher('<div class="cv-h3" style="margin-top:0.6rem">Droits</div>'
+                        '<div class="cv-muted" style="margin-bottom:0.3rem">Ignorés pour un administrateur, qui a tous les droits.</div>')
+            permissions = cases_permissions(f"mu_perm_{ident}", u.get('permissions', []))
+            enregistrer = st.form_submit_button("Enregistrer", type="primary", use_container_width=True)
+        if enregistrer:
+            ok, msg = auth.modifier_utilisateur(ident, nom=nom, permissions=permissions,
+                                                role=None if soi_meme else role,
+                                                actif=None if soi_meme else actif)
+            if ok:
+                flash(escape(msg))
+                st.rerun()
+            ui.message(escape(msg), 'rose', 'erreur')
+
+        if not soi_meme:
+            ui.afficher('<div class="cv-h3" style="margin-top:1rem">Mot de passe et suppression</div>')
+            if st.button("Réinitialiser le mot de passe", key=f"mu_reinit_{ident}", use_container_width=True):
+                mdp = auth.generer_mot_de_passe()
+                ok, msg = auth.definir_mot_de_passe(ident, mdp, doit_changer_mdp=True)
+                if ok:
+                    st.session_state.mdp_temporaire = (ident, mdp)
+                    st.rerun()
+                ui.message(escape(msg), 'rose', 'erreur')
+            confirmer = st.checkbox(f"Je confirme la suppression de « {ident} »", key=f"mu_conf_suppr_{ident}")
+            if st.button("Supprimer le compte", key=f"mu_suppr_{ident}", disabled=not confirmer, use_container_width=True):
+                ok, msg = auth.supprimer_utilisateur(ident)
+                if ok:
+                    st.session_state.pop('mu_sel', None)
+                    flash(escape(msg))
+                    st.rerun()
+                ui.message(escape(msg), 'rose', 'erreur')
+
+    with droite, st.container(key="carte_nouvel_utilisateur"):
+        ui.afficher('<div class="cv-h2">Nouveau compte</div>'
+                    '<div class="cv-muted" style="margin-bottom:0.4rem">Un mot de passe temporaire est généré ; '
+                    'l\'utilisateur le changera à sa première connexion.</div>')
+        n = st.session_state.get('nu_formulaire', 0)  # change après chaque création : formulaire vidé
+        with st.form(f"form_nu_{n}", border=False):
+            nom = st.text_input("Nom complet", key=f"nu_nom_{n}")
+            identifiant = st.text_input("Identifiant", key=f"nu_ident_{n}",
+                                        help="3 à 32 caractères : lettres minuscules, chiffres, point, tiret")
+            # « Utilisateur » d'abord : c'est le choix par défaut (le moins de droits)
+            role = st.radio("Rôle", [auth.ROLE_USER, auth.ROLE_ADMIN], format_func=auth.ROLES.get,
+                            horizontal=True, key=f"nu_role_{n}")
+            ui.afficher('<div class="cv-h3" style="margin-top:0.6rem">Droits</div>'
+                        '<div class="cv-muted" style="margin-bottom:0.3rem">Ignorés pour un administrateur, qui a tous les droits.</div>')
+            permissions = cases_permissions(f"nu_perm_{n}", auth.PERMISSIONS_PAR_DEFAUT)
+            creer = st.form_submit_button("Créer le compte", type="primary", use_container_width=True)
+        if creer:
+            mdp = auth.generer_mot_de_passe()
+            ok, msg = auth.creer_utilisateur(identifiant, nom, mdp, role, permissions, doit_changer_mdp=True)
+            if ok:
+                st.session_state.mdp_temporaire = (auth.normaliser_identifiant(identifiant), mdp)
+                st.session_state.nu_formulaire = n + 1
+                st.rerun()
+            ui.message(escape(msg), 'rose', 'erreur')
+
+# ============================================================
 # MAIN
 # ============================================================
 FONCTIONS_PAGES = {
     "Accueil": page_accueil, "Analyser": page_analyser, "Emails": page_emails,
     "Résultats": page_resultats, "Filtrer": page_filtrer, "Validation": page_validation,
     "Apprentissage": page_apprentissage, "Correspondance": page_correspondance,
-    "Paramètres": page_parametres,
+    "Paramètres": page_parametres, "Utilisateurs": page_utilisateurs, "Mon compte": page_mon_compte,
 }
 
 
 def main():
     ui.injecter_css()
+    if not verifier_session():
+        page_connexion()
+        return
+    if utilisateur_courant().get('doit_changer_mdp'):
+        page_changement_obligatoire()
+        return
     init_session()
+    # Les droits sont vérifiés ici, pas seulement en masquant les boutons du menu
+    if not peut_page(st.session_state.page_active):
+        st.session_state.page_active = "Accueil"
     afficher_menu()
     if st.session_state.flash:
         texte, ton, icone_nom = st.session_state.flash

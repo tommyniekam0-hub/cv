@@ -1,6 +1,9 @@
 # Secrets
 .streamlit/secrets.toml
 /config_email.json
+# Comptes utilisateurs (mots de passe hachés)
+/utilisateurs.json
+/.utilisateurs_*.tmp
 
 # Python
 __pycache__/
