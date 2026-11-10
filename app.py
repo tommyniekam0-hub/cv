@@ -13,7 +13,7 @@ import hashlib
 import unicodedata
 import warnings
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from typing import Dict, List, Tuple, Optional
 
 warnings.filterwarnings('ignore')
@@ -538,6 +538,143 @@ FICHIER_CONFIG_EMAIL = "config_email.json"
 SEUIL_CONFIANCE_DEFAUT = 70
 
 # ============================================================
+# OUTILS D'EXTRACTION DE L'IDENTITÉ
+# ============================================================
+def _sans_accents_txt(texte):
+    return ''.join(c for c in unicodedata.normalize('NFD', texte) if unicodedata.category(c) != 'Mn')
+
+
+# Prénoms fréquents (sans accents) en plus des listes d'ExtracteurInfos
+_PRENOMS_FEMININS_EN_PLUS = {
+    'aline', 'alice', 'amandine', 'anne', 'annie', 'aurelie', 'beatrice', 'berthe', 'blandine', 'brigitte',
+    'carine', 'cecile', 'chantal', 'christelle', 'cintia', 'cynthia', 'clarisse', 'colette', 'cyrielle',
+    'danielle', 'delphine', 'denise', 'desiree', 'desmonde', 'diane', 'dorothee', 'edith', 'elisabeth',
+    'elizabeth', 'estelle', 'esther', 'eugenie', 'evelyne', 'fabiola', 'florence', 'francine', 'gisele',
+    'gladys', 'helene', 'henriette', 'huguette', 'ines', 'irene', 'jacqueline', 'joelle', 'josiane',
+    'josephine', 'judith', 'justine', 'laetitia', 'leopoldine', 'linda', 'lydie', 'mabelle', 'marceline',
+    'mireille', 'martine', 'nadege', 'nadine', 'nicole', 'noelle', 'odile', 'olive', 'pauline', 'pauliana',
+    'perpetue', 'priscille', 'prisca', 'rachel', 'rebecca', 'regine', 'rose', 'roseline', 'ruth', 'sabine',
+    'sandra', 'sidonie', 'solange', 'stephanie', 'suzanne', 'sylviane', 'therese', 'vanessa', 'victoire',
+    'virginie', 'viviane', 'yvette', 'yvonne', 'phalone', 'mairamou', 'hadiza', 'hadja', 'fadimatou',
+    'ramatou', 'zara', 'mariam', 'clementine', 'flore', 'flora', 'gaelle', 'larissa', 'raissa', 'carole',
+    'murielle', 'michele', 'micheline', 'leonie', 'ornella', 'tatiana', 'armelle', 'merveille', 'nelly',
+    'gwladys', 'marlyse', 'claudine', 'paulette', 'mary', 'elizabeth', 'margaret', 'susan', 'linda',
+    'blessing', 'precious', 'peace', 'mercy', 'faith', 'gift', 'lilian', 'brenda',
+}
+_PRENOMS_MASCULINS_EN_PLUS = {
+    'alain', 'albert', 'andre', 'armand', 'arnaud', 'augustin', 'bertrand', 'boris', 'bruno', 'cedric',
+    'christian', 'claude', 'clement', 'cyrille', 'denis', 'didier', 'dieudonne', 'dominique', 'edouard',
+    'elie', 'emile', 'ernest', 'fabrice', 'felix', 'fernand', 'florent', 'francis', 'frederic', 'gabriel',
+    'georges', 'gerald', 'gerard', 'ghislain', 'gilbert', 'guy', 'herve', 'hippolite', 'hippolyte',
+    'ibrahim', 'isaac', 'jacob', 'jerome', 'joel', 'jonas', 'jordan', 'landry', 'leonard', 'lionel',
+    'marcel', 'martin', 'mathieu', 'maurice', 'mirabeau', 'narcisse', 'paulin', 'rene', 'roger', 'roland',
+    'romain', 'simon', 'stephane', 'sylvain', 'thierry', 'yannick', 'yvan', 'yves', 'william', 'blaise',
+    'aboubakar', 'aboubakary', 'ahmadou', 'issa', 'oumarou', 'bouba', 'ali', 'hassan', 'rodrigue',
+    'ulrich', 'junior', 'brice', 'steve', 'franklin', 'herman', 'valentin', 'innocent', 'achille', 'aime',
+    'apollinaire', 'theophile', 'bienvenu', 'john', 'james', 'michael', 'peter', 'george', 'kevin',
+    'christopher', 'anthony', 'edward', 'henry', 'robert', 'frank', 'eric', 'nelson', 'collins',
+}
+
+# Mots qui ne sont jamais un nom de personne (pays, titres de rubrique, métiers…)
+_MOTS_NON_NOMS = {
+    'cameroun', 'cameroon', 'france', 'senegal', 'gabon', 'congo', 'tchad', 'nigeria', 'afrique',
+    'ville', 'quartier', 'domicile', 'adresse', 'page', 'sur', 'de', 'du', 'des', 'la', 'le', 'les',
+    'et', 'and', 'of', 'the', 'en', 'au', 'aux', 'pour', 'avec', 'chez', 'sas', 'sarl',
+    'assistant', 'assistante', 'secretaire', 'administrative', 'administratif', 'direction', 'gestion',
+    'responsable', 'ingenieur', 'technicien', 'technicienne', 'comptable', 'commercial', 'commerciale',
+    'chef', 'agent', 'stagiaire', 'stage', 'executif', 'executive', 'manager', 'directeur', 'directrice',
+    'developpeur', 'web', 'mobile', 'agronome', 'operateur', 'production', 'chaudiere', 'ressources',
+    'humaines', 'rh', 'professionnel', 'professionnelle', 'personal', 'details', 'information',
+    'informations', 'personnelles', 'coordonnees', 'resume', 'summary', 'skills', 'work', 'experience',
+    'education', 'training', 'languages', 'langues', 'profil', 'objet', 'candidature', 'lettre',
+    'motivation', 'maj', 'update', 'doc', 'crew', 'appraisal', 'report', 'ref', 'bp', 'tel',
+    'whatsapp', 'linkedin', 'email', 'mail', 'contact', 'disponibilite', 'gouvernance', 'performance',
+    'efficacite', 'operationnelle', 'permis', 'nationalite', 'jeune', 'diplome', 'diplomee', 'attache',
+    'attachee', 'surname', 'name', 'names', 'given', 'birth', 'date', 'lieu', 'sexe', 'sex', 'emploi',
+    'cible', 'travah', 'etat', 'civil', 'curriculum', 'vitae', 'sept', 'fev', 'aout', 'janv', 'juil', 'oct', 'nov', 'dec', 'avr',
+}
+_SUFFIXES_METIER = r'(icienne?|trice|teur|euse|iste|ique|ment|tion|sion)$'
+_CIVILITE = re.compile(r'^\s*(m(?:onsieu)?r\.?|mme\.?|mlle\.?|madame|mademoiselle|mrs?\.?|ms\.?|miss|dr\.?)\s+',
+                       re.IGNORECASE)
+_ETIQUETTE_NOM = re.compile(
+    r"^\s*(noms?\s*(?:de\s+famille|complet|et\s+pr[ée]noms?|&\s*pr[ée]noms?)?|pr[ée]noms?|surname|last\s+name|"
+    r"family\s+name|first\s+names?|given\s+names?|other\s+names?|full\s+name|name)\s*[:\-]\s*(.+)$",
+    re.IGNORECASE)
+
+
+_ETIQUETTE_SEULE = re.compile(r'^(?:(pr[ée]noms?(?:i?givennames?)?|givennames?)|noms?(?:i?surname)?|surname)$',
+                              re.IGNORECASE)
+
+
+def _recoller_lettres(ligne):
+    """"B I L LO N G P A U L I A N A" -> "BILLONG PAULIANA" : recolle les lettres espacées
+    et redécoupe les mots grâce aux prénoms connus"""
+    jetons = ligne.split()
+    if (len(jetons) < 4 or not all(j.isalpha() for j in jetons)
+            or sum(len(j) <= 2 for j in jetons) < 0.7 * len(jetons)):
+        return ligne
+    return _decouper_prenoms(''.join(jetons))
+
+
+def _decouper_prenoms(colle):
+    """"CINTIAMABELLE" -> "CINTIA MABELLE" : coupe autour des prénoms connus (les plus longs d'abord)"""
+    bas = _sans_accents_txt(colle).lower()
+    pris = []
+    for p in sorted(_PRENOMS_SANS_ACCENT, key=len, reverse=True):
+        if len(p) < 4:
+            continue
+        for m in re.finditer(p, bas):
+            if not any(m.start() < b and a < m.end() for a, b in pris):
+                pris.append((m.start(), m.end()))
+    coupures = sorted({c for a, b in pris for c in (a, b) if 0 < c < len(colle)})
+    morceaux = [colle[a:b] for a, b in zip([0] + coupures, coupures + [len(colle)])]
+    return " ".join(m for m in morceaux if m)
+
+
+def _nettoyer_valeur_nom(valeur):
+    valeur = _CIVILITE.sub('', valeur.strip())
+    valeur = re.split(r'\s{3,}|\t|[|,;(]', valeur)[0]
+    mots = re.findall(r"[A-Za-zÀ-ÿ']{2,}|I{2,3}", valeur)
+    return " ".join(mots[:5])
+
+
+def _formater_nom(nom):
+    return " ".join(nom.split()).upper()
+
+
+def _formater_prenom(prenom):
+    mots = []
+    for m in prenom.split():
+        # Prénoms collés par l'OCR : "CINTIAMABELLE" -> "Cintia Mabelle"
+        if len(m) >= 10:
+            morceaux = _decouper_prenoms(m).split()
+            if len(morceaux) >= 2 and all(len(x) >= 3 for x in morceaux):
+                mots += morceaux
+                continue
+        mots.append(m)
+    return " ".join(m if re.fullmatch(r'I{1,3}|IV', m) else m.capitalize() for m in mots)
+
+
+class _Indices(set):
+    """Mots de l'email et du nom de fichier ; un mot y est "présent" s'il est dans
+    une adresse collée ("chezeucintia" contient "cintia")"""
+    def __contains__(self, mot):
+        return len(mot) >= 3 and (set.__contains__(self, mot) or any(len(i) > 6 and mot in i for i in self))
+
+
+def _indices_identite(email, nom_fichier):
+    indices = set()
+    if nom_fichier:
+        base = _sans_accents_txt(os.path.splitext(os.path.basename(nom_fichier))[0]).lower()
+        indices |= set(re.findall(r'[a-z]{3,}', base))
+    if email and '@' in email:
+        local = _sans_accents_txt(email.split('@')[0]).lower()
+        indices |= set(re.findall(r'[a-z]{3,}', local))
+    indices -= _MOTS_NON_NOMS | {'cv', 'curriculum', 'vitae', 'gmail', 'yahoo', 'pdf', 'docx'}
+    return _Indices(indices)
+
+
+# ============================================================
 # EXTRACTEUR
 # ============================================================
 class ExtracteurInfos:
@@ -602,6 +739,9 @@ class ExtracteurInfos:
             'brazzaville', 'kinshasa', 'casablanca', 'tunis', 'londres',
             'montréal', 'bruxelles'
         ]
+        self._villes_sans_accent = {_sans_accents_txt(v) for v in self.villes} | {
+            'yaounde', 'ngaoundere', 'bamendjou', 'ndogbong', 'beedi', 'akwa', 'bonaberi', 'bonamoussadi',
+            'makepe', 'logbessou', 'mbouda', 'nkongsamba', 'loum', 'mbanga', 'obala', 'mbalmayo', 'ccc'}
     
     def extraire_email(self, texte):
         for p in [r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
@@ -634,55 +774,125 @@ class ExtracteurInfos:
                     return tel
         return "RAS"
     
-    def extraire_nom_prenom(self, texte, email="RAS"):
-        nom, prenom = "", ""
-        for p in [r'(?:^|\n)\s*NOM\s*(?:DE\s*FAMILLE)?\s*[:\-]\s*([A-ZÀ-Ý][a-zà-ÿA-ZÀ-Ý\s\-]{1,30})']:
-            m = re.search(p, texte, re.MULTILINE)
-            if m:
-                nom = m.group(1).strip().split()[0]
-                break
-        for p in [r'(?:^|\n)\s*PR[EÉ]NOM[S]?\s*[:\-]\s*([A-ZÀ-Ý][a-zà-ÿA-ZÀ-Ý\s\-]{1,30})']:
-            m = re.search(p, texte, re.MULTILINE)
-            if m:
-                prenom = m.group(1).strip().split()[0]
-                break
-        if nom and prenom:
-            return nom, prenom
-        
-        lignes = [l.strip() for l in texte.split('\n') if l.strip()]
-        for ligne in lignes[:3]:
-            ligne_clean = re.sub(r'[·•\-/–—|]', ' ', ligne)
-            ligne_clean = re.sub(r'\s+', ' ', ligne_clean).strip()
-            if len(ligne_clean) < 4 or len(ligne_clean) > 45:
+    def extraire_nom_prenom(self, texte, email="RAS", nom_fichier=""):
+        """(NOM, Prénom) du candidat, ou ("RAS", "RAS").
+        1. champs étiquetés (Nom :, Prénom :, Surname :, Name :...)
+        2. sinon la ligne de l'en-tête qui ressemble le plus à un nom,
+           confirmée par l'adresse email et le nom du fichier
+        3. sinon l'adresse email (prenom.nom@...)"""
+        lignes = [_recoller_lettres(l.strip()) for l in texte.split('\n') if l.strip()]
+
+        # 1. Champs étiquetés
+        champs = {}
+        for i, ligne in enumerate(lignes[:30]):
+            m = _ETIQUETTE_NOM.match(ligne)
+            if not m:
+                # Étiquette seule, valeur à la ligne suivante (carte d'identité : "NOM/SURNAME")
+                seule = _ETIQUETTE_SEULE.match(re.sub(r'[^A-Za-zÉé]', '', ligne))
+                if seule and i + 1 < len(lignes):
+                    valeur = _nettoyer_valeur_nom(lignes[i + 1])
+                    if valeur:
+                        champs.setdefault('prenom' if seule.group(1) else 'nom', valeur)
                 continue
-            mots = re.findall(r'\b[A-Za-zÀ-ÿ]{2,20}\b', ligne_clean)
-            if not (2 <= len(mots) <= 3):
+            cle = _sans_accents_txt(re.sub(r'\s+', ' ', m.group(1))).lower()
+            valeur = _nettoyer_valeur_nom(m.group(2))
+            if not valeur:
                 continue
-            if any(m.upper() in self.MOTS_INTERDITS for m in mots):
+            if cle == 'name':
+                # "Surname : X" puis "Name : Y" : Name = prénoms ; "Name" seul = nom complet
+                genre = 'prenom' if 'nom' in champs else 'complet'
+            elif re.match(r'(full name|noms? (complet|et|&))', cle):
+                genre = 'complet'
+            elif re.match(r'(pr|first|given|other)', cle):
+                genre = 'prenom'
+            else:
+                genre = 'nom'
+            champs.setdefault(genre, valeur)
+        if champs.get('nom') and champs.get('prenom'):
+            return _formater_nom(champs['nom']), _formater_prenom(champs['prenom'])
+        if champs.get('complet') and len(champs['complet'].split()) >= 2:
+            return self._separer_nom_prenom(champs['complet'].split())
+
+        # 2. Meilleure ligne de l'en-tête
+        indices = _indices_identite(email, nom_fichier)
+        meilleur, meilleur_score = None, 0
+        for i, ligne in enumerate(lignes[:30]):
+            mots = self._mots_nom(ligne)
+            if not mots:
                 continue
-            if not all(m[0].isupper() for m in mots):
-                continue
-            if len(mots) == 2:
-                prenom = mots[0].capitalize()
-                nom = mots[1].upper()
-            elif len(mots) == 3:
-                if mots[0].isupper() and mots[1].isupper() and mots[2].isupper():
-                    nom = mots[0].upper()
-                    prenom = f"{mots[1].capitalize()} {mots[2].capitalize()}"
-                else:
-                    prenom = f"{mots[0].capitalize()} {mots[1].capitalize()}"
-                    nom = mots[2].upper()
-            return nom, prenom
-        
+            candidats = [mots]
+            # Nom sur deux lignes : "TAPTUE FOTSO" / "GHISLAIN LANDRY"
+            if i + 1 < len(lignes) and len(mots) <= 3:
+                suite = self._mots_nom(lignes[i + 1])
+                if suite and len(mots) + len(suite) <= 5 and all(m.isupper() for m in mots + suite):
+                    candidats.append(mots + suite)
+            for c in candidats:
+                score = 3 - i * 0.1
+                score += sum(4 for m in c if _sans_accents_txt(m).lower() in indices)
+                score += sum(1 for m in c if _sans_accents_txt(m).lower() in _PRENOMS_SANS_ACCENT)
+                if any(m.isupper() and len(m) > 1 for m in c): score += 1
+                if len(c) == 1: score -= 3
+                if score > meilleur_score:
+                    meilleur, meilleur_score = c, score
+        if meilleur and len(meilleur) >= 2:
+            return self._separer_nom_prenom(meilleur)
+
+        # 3. Adresse email : prenom.nom@...
         if email and email != "RAS" and '@' in email:
             partie = re.sub(r'\d+', '', email.split('@')[0])
             for sep in ['.', '_', '-']:
                 if sep in partie:
                     parts = [p for p in partie.split(sep) if p and p.upper() not in self.MOTS_INTERDITS and len(p) > 1]
                     if len(parts) >= 2:
-                        return parts[1].upper(), parts[0].capitalize()
+                        return self._separer_nom_prenom(parts[:2])
         return "RAS", "RAS"
-    
+
+    def _mots_nom(self, ligne):
+        """Mots d'une ligne qui peut être un nom de personne, sinon None"""
+        ligne = re.sub(r'^(cv|curriculum vitae)\s*[–—:\-]\s*', '', ligne, flags=re.IGNORECASE)
+        ligne = re.sub(r'^\s*(name|nom)\s*:\s*', '', ligne, flags=re.IGNORECASE)
+        # "BILLONG Pauliana Audrey      Douala le 22 octobre" : on garde le premier bloc
+        ligne = re.split(r'\s{3,}|\s[|·•/]\s|\t', ligne)[0]
+        ligne = _CIVILITE.sub('', ligne).strip()
+        if not ligne or re.search(r'[\d@:,;()]', ligne) or len(ligne) > 50:
+            return None
+        mots = ligne.replace('-', ' ').split()
+        if not 1 <= len(mots) <= 5:
+            return None
+        for m in mots:
+            if not re.fullmatch(r"[A-Za-zÀ-ÿ']{2,25}|I{2,3}|IV", m) or not m[0].isupper():
+                return None
+            n = _sans_accents_txt(m).lower()
+            if (m.upper() in self.MOTS_INTERDITS or n in _MOTS_NON_NOMS or
+                    n in self._villes_sans_accent or re.search(_SUFFIXES_METIER, n)):
+                return None
+        return mots
+
+    def _separer_nom_prenom(self, mots):
+        """Sépare NOM et Prénom. Convention des CV : le NOM est en majuscules,
+        sinon on s'aide de la liste des prénoms connus."""
+        mots = [m for m in mots if m]
+        if len(mots) < 2:
+            return "RAS", "RAS"
+        majuscules = [m.isupper() and len(m) > 1 for m in mots]
+        if any(majuscules) and not all(majuscules):
+            nom = [m for m, maj in zip(mots, majuscules) if maj]
+            prenom = [m for m, maj in zip(mots, majuscules) if not maj]
+            return _formater_nom(" ".join(nom)), _formater_prenom(" ".join(prenom))
+        connus = [_sans_accents_txt(m).lower() in _PRENOMS_SANS_ACCENT for m in mots]
+        if any(connus) and not all(connus):
+            if connus[0]:
+                # Prénom(s) en tête : "Didier Patrick DJILLA"
+                k = connus.index(False)
+                return _formater_nom(" ".join(mots[k:])), _formater_prenom(" ".join(mots[:k]))
+            # NOM en tête : "MANGA MARIE CYRIELLE"
+            k = connus.index(True)
+            return _formater_nom(" ".join(mots[:k])), _formater_prenom(" ".join(mots[k:]))
+        if all(connus):
+            return _formater_nom(mots[-1]), _formater_prenom(" ".join(mots[:-1]))
+        # Aucun prénom connu : convention camerounaise NOM Prénom(s)
+        return _formater_nom(mots[0]), _formater_prenom(" ".join(mots[1:]))
+
     def extraire_niveau(self, texte):
         t = texte.lower()
         meilleur, pts = "RAS", 0
@@ -878,9 +1088,9 @@ class ExtracteurInfos:
                 return v.capitalize()
         return "RAS"
     
-    def extraire_tout(self, texte):
+    def extraire_tout(self, texte, nom_fichier=""):
         email = self.extraire_email(texte)
-        nom, prenom = self.extraire_nom_prenom(texte, email)
+        nom, prenom = self.extraire_nom_prenom(texte, email, nom_fichier)
         niveau, pts = self.extraire_niveau(texte)
         return {
             'nom': nom or "RAS", 'prenom': prenom or "RAS",
@@ -901,54 +1111,118 @@ class ExtracteurInfos:
         }
 
 # ============================================================
-# MODULE : ÂGE CALCULÉ + SEXE CONFIANCE
+# MODULE : IDENTITÉ (NOM / PRÉNOM), ÂGE, SEXE
 # ============================================================
-# Une date n'est une date de naissance que si elle suit "né(e) le", "date de naissance"…
-# (sinon les dates d'expérience comme "01/09/2018" donnaient des âges absurdes)
-_CONTEXTE_NAISSANCE = (r"(?:(?<!\w)n[ée]\(?e?\)?\s+(?:le\s+|en\s+|à\s+\S+\s+le\s+)?"
-                       r"|date\s+de\s+naissance\s*[:\-]?\s*|naissance\s*[:\-]\s*)")
-_DATE_NAISSANCE = re.compile(
-    _CONTEXTE_NAISSANCE + r"(?:\d{1,2}\s*[/\-.]\s*\d{1,2}\s*[/\-.]\s*|\d{1,2}(?:er)?\s+[a-zéû]+\s+)?(19\d{2}|20\d{2})",
+_PRENOMS_F_SANS_ACCENT = {_sans_accents_txt(p) for p in ExtracteurInfos.PRENOMS_FEMININS} | _PRENOMS_FEMININS_EN_PLUS
+_PRENOMS_M_SANS_ACCENT = {_sans_accents_txt(p) for p in ExtracteurInfos.PRENOMS_MASCULINS} | _PRENOMS_MASCULINS_EN_PLUS
+_PRENOMS_SANS_ACCENT = _PRENOMS_F_SANS_ACCENT | _PRENOMS_M_SANS_ACCENT
+
+# --- Âge : année actuelle - année de naissance -------------------------------
+_MOIS = (r"janv(?:ier)?|f[ée]v(?:rier)?|mars|avr(?:il)?|mai|juin|juil(?:let)?|ao[uû]t|sept(?:embre)?|"
+         r"oct(?:obre)?|nov(?:embre)?|d[ée]c(?:embre)?|jan(?:uary)?|feb(?:ruary)?|march|apr(?:il)?|may|"
+         r"june?|july?|aug(?:ust)?|sep(?:t|tember)?|october|november|december")
+_CONTEXTE_NAISSANCE = re.compile(
+    r"(date\s*(?:et\s*lieu\s*)?de\s*naissance|date\s*of\s*birth|birth\s*date|d\.?o\.?b\b|born(?:\s+on)?|"
+    r"(?<!\w)n[ée]e?\s*(?:\(e\))?\s*(?:le\b|en\b|à\b|:|(?=\s\d))|naissance\s*:)",
+    re.IGNORECASE)
+# La date suit l'étiquette, éventuellement après quelques mots ("à Douala le", "SEXE/SEX")
+_DATE_APRES_CONTEXTE = re.compile(
+    r"[^\d]{0,40}?(?:"
+    r"\d{1,2}\s*[/\-.]\s*\d{1,2}\s*[/\-.]\s*(?P<a1>(?:19|20)\d{2}|\d{2})\b"          # 17/05/1991 ou 17/05/91
+    r"|(?P<a2>(?:19|20)\d{2})\s*[/\-.]\s*\d{1,2}\s*[/\-.]\s*\d{1,2}"                # 1991-05-17
+    r"|(?:\d{1,2}(?:er|st|nd|rd|th)?\s+)?(?:" + _MOIS + r")\.?,?\s+(?:\d{1,2},?\s+)?(?P<a3>(?:19|20)\d{2})"  # 3 Septembre 1989
+    r"|(?:vers\s+|in\s+)?(?P<a4>(?:19|20)\d{2})\b)",                                # né en 1990
     re.IGNORECASE)
 _AGES_DIRECTS = [
-    (re.compile(r"j['’]?ai\s+(\d{1,2})\s*ans", re.IGNORECASE), 0.90),
-    (re.compile(r"(?<!\w)[âa]ge\s*[:\-]\s*(\d{1,2})\b", re.IGNORECASE), 0.95),  # pas "stage : 6 mois"
-    (re.compile(r"\((\d{1,2})\s*ans\)", re.IGNORECASE), 0.80),
+    (re.compile(r"(?<!\w)[âa]ge\s*[:\-]\s*(\d{2})\b", re.IGNORECASE), 0.95),   # pas "stage : 6 mois"
+    (re.compile(r"[âa]g[ée]e?\s+de\s+(\d{2})\s*ans", re.IGNORECASE), 0.95),
+    (re.compile(r"j['’]?ai\s+(\d{2})\s*ans", re.IGNORECASE), 0.90),
+    (re.compile(r"\b(\d{2})\s*(?:years?\s+old|ans\s*,?\s*(?:c[ée]libataire|mari[ée]))", re.IGNORECASE), 0.85),
 ]
 
 
 def calculer_age_depuis_annee(texte):
-    """Âge du candidat et confiance : ("28", 0.98) ou ("RAS", 0.0)"""
+    """Âge du candidat (année actuelle - année de naissance) et confiance : ("28", 0.98) ou ("RAS", 0.0)"""
     annee_actuelle = datetime.now().year
-    ages_candidats = []
-    for m in _DATE_NAISSANCE.finditer(texte):
-        age = annee_actuelle - int(m.group(1))
-        if 15 <= age <= 85: ages_candidats.append((age, 0.98))
+    for m in _CONTEXTE_NAISSANCE.finditer(texte):
+        d = _DATE_APRES_CONTEXTE.match(re.sub(r'\s+', ' ', texte[m.end():m.end() + 150])[:70])
+        if not d:
+            continue
+        annee = next(a for a in (d.group('a1'), d.group('a2'), d.group('a3'), d.group('a4')) if a)
+        if len(annee) == 2:
+            annee = ("20" if int(annee) <= annee_actuelle % 100 - 14 else "19") + annee
+        age = annee_actuelle - int(annee)
+        if 15 <= age <= 80:
+            return str(age), 0.98
     for motif, confiance in _AGES_DIRECTS:
         for m in motif.finditer(texte):
             age = int(m.group(1))
-            if 15 <= age <= 85: ages_candidats.append((age, confiance))
-    if not ages_candidats: return "RAS", 0.0
-    ages_candidats.sort(key=lambda x: x[1], reverse=True)
-    return str(ages_candidats[0][0]), ages_candidats[0][1]
+            if 15 <= age <= 80:
+                return str(age), confiance
+    return "RAS", 0.0
+
+
+# --- Sexe -------------------------------------------------------------------------
+# Formes féminines / masculines par lesquelles le candidat se décrit
+_FORMES_FEMININES = re.compile(
+    r"(?<!\w)(assistante|attach[ée]e|dipl[ôo]m[ée]e|rigoureuse|travailleuse|s[ée]rieuse|consciencieuse|"
+    r"motiv[ée]e|passionn[ée]e|organis[ée]e|d[ée]termin[ée]e|d[ée]vou[ée]e|polyvalente|[ée]tudiante|"
+    r"technicienne|[ée]lectrotechnicienne|informaticienne|commerciale|directrice|coordinatrice|animatrice|"
+    r"consultante|infirmi[èe]re|caissi[èe]re|ing[ée]nieure|charg[ée]e|forte\s+de|une\s+jeune|"
+    r"je\s+suis\s+une|jeune\s+femme)(?!\w)", re.IGNORECASE)
+_FORMES_MASCULINES = re.compile(
+    r"(?<!\w)(assistant|attach[ée]|dipl[ôo]m[ée]|rigoureux|travailleur|s[ée]rieux|consciencieux|motiv[ée]|"
+    r"passionn[ée]|organis[ée]|d[ée]termin[ée]|d[ée]vou[ée]|[ée]tudiant|technicien|[ée]lectrotechnicien|"
+    r"informaticien|directeur|coordinateur|animateur|consultant|infirmier|caissier|charg[ée]|"
+    r"fort\s+de|un\s+jeune|je\s+suis\s+un|jeune\s+homme)(?!\w)", re.IGNORECASE)
+
+
+def _genre_formes(texte):
+    """("Femme"/"Homme", écart) d'après les accords féminins/masculins du texte, sinon (None, 0)"""
+    fem = len(_FORMES_FEMININES.findall(texte))
+    masc = len(_FORMES_MASCULINES.findall(texte))
+    if fem > masc:
+        return "Femme", fem - masc
+    if masc > fem:
+        return "Homme", masc - fem
+    return None, 0
 
 
 def determiner_sexe_avec_confiance(texte, prenom="RAS"):
-    """Sexe et confiance. Les pronoms "il"/"elle" ne sont pas utilisés (trop fréquents dans un texte)."""
+    """Sexe et confiance : civilité ou champ "Sexe" > titre du CV > prénom > "né(e)" > accords du texte.
+    Les pronoms "il"/"elle" ne sont pas utilisés (trop fréquents dans un texte)."""
     t = texte.lower()
+    lignes = [l for l in t.split('\n') if l.strip()]
     # Civilité dans l'en-tête du CV seulement (pas dans les références : "Contact : Mr X")
-    entete = " ".join([l for l in t.split('\n') if l.strip()][:8])
-    if re.search(r'\b(madame|mme|mlle|mademoiselle)\b', entete): return "Femme", 0.99
-    if re.search(r'\b(monsieur|mr)\b', entete): return "Homme", 0.99
+    # et seulement devant un nom ("Mlle CHEZEU", pas "Madame, Monsieur," d'une lettre)
+    for ligne in lignes[:8]:
+        if re.match(r'\s*(madame|mme|mlle|mademoiselle|mrs|miss)\.?\s+[a-zà-ÿ]', ligne): return "Femme", 0.99
+        if re.match(r'\s*(monsieur|mr|m)\.?\s+[a-zà-ÿ]', ligne): return "Homme", 0.99
+    # Bande lisible d'une carte d'identité : date de naissance (6 chiffres + contrôle) puis F/M
+    m = re.search(r'\b\d{7}([fm])\d{7}', t)
+    if m:
+        return ("Femme", 0.97) if m.group(1) == 'f' else ("Homme", 0.97)
+    m = re.search(r'\b(?:sexe|sex|gender|genre)\s*[:\-]\s*(f[ée]minin|masculin|femme|homme|female|male|f|m)\b', t)
+    if m:
+        return ("Femme", 0.99) if m.group(1)[0] == 'f' else ("Homme", 0.99)
+    # Titre du CV en tête ("ASSISTANTE ADMINISTRATIVE", "ÉLECTROTECHNICIENNE")
+    # (lignes courtes sans ":" seulement, pas "Objet : poste d'attaché de direction (H/F)")
+    titres = [l for l in lignes[:6] if ':' not in l and len(l.split()) <= 6]
+    genre, _ = _genre_formes(" ".join(titres))
+    if genre:
+        return genre, 0.92
     if prenom and prenom != "RAS":
-        for p in prenom.lower().split():
-            if p in ExtracteurInfos.PRENOMS_FEMININS: return "Femme", 0.90
-            if p in ExtracteurInfos.PRENOMS_MASCULINS: return "Homme", 0.90
+        for p in _sans_accents_txt(prenom).lower().split():
+            if p in _PRENOMS_F_SANS_ACCENT: return "Femme", 0.90
+            if p in _PRENOMS_M_SANS_ACCENT: return "Homme", 0.90
     # Accords grammaticaux : "née le", "mariée" (mais pas la formule neutre "marié(e)")
-    if re.search(r'(?<!\w)née\s+(?:le|en|à)\b', t): return "Femme", 0.90
-    if re.search(r'(?<!\w)né\s+(?:le|en|à)\b', t): return "Homme", 0.90
+    if re.search(r'(?<!\w)née\s*(?:le|en|à|:)', t): return "Femme", 0.88
+    if re.search(r'(?<!\w)né\s*(?:le|en|à|:)', t): return "Homme", 0.88
     if re.search(r'\b(mariée|épouse|m[èe]re\s+de)\b', t): return "Femme", 0.85
     if re.search(r'\b(époux|p[èe]re\s+de)\b|\bmarié\b(?!\s*\(e\))', t): return "Homme", 0.85
+    genre, ecart = _genre_formes(" ".join(lignes[:40]))
+    if genre and ecart >= 2:
+        return genre, 0.75
     return "RAS", 0.0
 
 
@@ -1693,7 +1967,7 @@ def analyser_cv(chemin, nom, source=None, copie_nom=None, sous_dossier_metier=Fa
         st.session_state.resultats.append(r)
         return r
 
-    infos = st.session_state.extract.extraire_tout(texte)
+    infos = st.session_state.extract.extraire_tout(texte, nom)
     infos = appliquer_apprentissage(infos, st.session_state.apprentissage)
 
     cat, metier, conf = st.session_state.classif.classifier(texte)
@@ -2434,6 +2708,10 @@ def page_correspondance():
 # ============================================================
 def traiter_email(em, gestionnaire):
     """Analyse les pièces jointes d'un email puis le déplace dans le dossier des emails traités"""
+    # Les CV ne sont téléchargés qu'ici (la vérification ne lit que la liste des pièces jointes)
+    ok, msg = gestionnaire.telecharger_pieces_jointes(em)
+    if not ok:
+        return 0, False, msg
     nb = 0
     illisibles = []
     for pj in em['pieces_jointes']:
@@ -2465,6 +2743,10 @@ def email_correspond(em, recherche):
     return all(mot in cible for mot in mots)
 
 
+# Nombre maximum d'emails lus par vérification (les plus récents de la période)
+MAX_EMAILS_VERIFIES = 2000
+
+
 def page_emails():
     ui.entete("Boîte mail RH", "Récupérez et analysez automatiquement les CV reçus par email.")
     creds = creds_messagerie()
@@ -2484,15 +2766,31 @@ def page_emails():
         if b2.button("Vider", key="btn_vider_emails", use_container_width=True):
             st.session_state.pop('emails_recuperes', None)
             st.rerun()
+        d1, d2, _ = st.columns([1.3, 1.3, 3.6])
+        date_debut = d1.date_input("Du", value=date.today() - timedelta(days=30), max_value=date.today(),
+                                   format="DD/MM/YYYY", key="emails_date_debut")
+        date_fin = d2.date_input("Au", value=date.today(), max_value=date.today(),
+                                 format="DD/MM/YYYY", key="emails_date_fin")
 
     def gestionnaire():
         return GestionnaireEmail(serveur, port, email_address, mot_de_passe, dossier_traites)
 
     if verifier:
-        with st.spinner("Connexion à la boîte mail..."):
+        if date_debut > date_fin:
+            ui.message("La date de début doit être antérieure à la date de fin.", 'ambre', 'alerte')
+            return
+        barre = st.progress(0.0, text="Connexion à la boîte mail...")
+
+        def avancer(fait, total):
+            if total:
+                barre.progress(fait / total, text=f"Lecture des emails : {fait} / {total}")
+
+        with st.spinner("Vérification des emails en cours..."):
             g = gestionnaire()
-            emails, msg = g.recuperer_emails(max_emails=30)
+            emails, msg = g.recuperer_emails(max_emails=MAX_EMAILS_VERIFIES, date_debut=date_debut,
+                                             date_fin=date_fin, progression=avancer)
             g.se_deconnecter()
+        barre.empty()
         st.session_state.emails_recuperes = emails
         if not emails:
             ui.message(escape(msg), 'bleu', 'boite')
@@ -2556,14 +2854,17 @@ def page_emails():
                else "Analyser l'email affiché" if filtre else "Analyser tous les emails")
     if st.button(libelle, type="primary", key="btn_analyser_tous"):
         total, echecs = 0, 0
-        with st.spinner("Analyse des CV reçus..."):
+        barre = st.progress(0.0, text="Connexion à la boîte mail...")
+        with st.spinner("Analyse des CV reçus en cours..."):
             g = gestionnaire()
             g.se_connecter()
-            for em in emails:
+            for n, em in enumerate(emails):
+                barre.progress(n / len(emails), text=f"Analyse des emails : {n} / {len(emails)}")
                 nb, ok, _ = traiter_email(em, g)
                 total += nb
                 echecs += not ok
             g.se_deconnecter()
+        barre.empty()
         traites = {em['id'] for em in emails}
         st.session_state.emails_recuperes = [e for e in tous_les_emails if e['id'] not in traites]
         flash(f"{total} CV analysés et classés."
